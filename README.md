@@ -32,10 +32,13 @@ A lightweight, high-performance Discord bot written in **Java 17**, compiled dir
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
 
 ### 2. Build the WebAssembly Binary
-Compile your Java code into `.wasm` artifacts:
+Compile your Java code into `.wasm` artifacts. The npm script selects the installed Java 17 JDK on Windows:
 ```bash
-mvn clean package
+npm run build:java
 ```
+
+The bot currently provides `/ping`, `/hello`, and `/info`.
+
 ### 3. Configure Secrets
 Set your Discord Application Public Key in Cloudflare Secrets:
 
@@ -44,14 +47,14 @@ npx wrangler secret put DISCORD_PUBLIC_KEY
 ```
 
 ### 4. Deploy to Cloudflare
-Deploy your worker globally:
+Build and deploy the worker, then register its slash commands:
 
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
 
 ### 5. Register Slash Commands
-Update register.js with your App ID and Bot Token, then run:
+If you deploy with `npm run deploy`, registration is already included. To register separately, update the local, git-ignored `register.js` with your App ID and Bot Token, then run:
 
 ```bash
 node register.js
@@ -63,7 +66,9 @@ node register.js
 │   ├── main/java/com/matthewtrefusis/
 │   │   └── DiscordWorker.java     # Core Java bot logic & @Export endpoints
 │   ├── index.ts                   # TypeScript edge worker & Ed25519 verification
-│   └── env.d.ts                   # Wasm module declarations
+│   ├── wasm.d.ts                  # Wasm module declarations
+├── package.json                   # Build, deploy, and registration scripts
+├── tsconfig.json                  # TypeScript project configuration
 ├── dist/                          # Compiled Wasm build output
 ├── pom.xml                        # Maven & TeaVM plugin configuration
 ├── wrangler.toml                  # Cloudflare Workers configuration
