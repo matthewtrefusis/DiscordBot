@@ -26,13 +26,16 @@ A lightweight, high-performance Discord bot written in **Java 17**, compiled dir
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
+
 - [Node.js](https://nodejs.org/) & [npm](https://www.npmjs.com/)
 - [Java 17 SDK](https://adoptium.net/)
 - [Apache Maven](https://maven.apache.org/)
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
 
 ### 2. Build the WebAssembly Binary
+
 Compile your Java code into `.wasm` artifacts. The npm script selects the installed Java 17 JDK on Windows:
+
 ```bash
 npm run build:java
 ```
@@ -40,6 +43,7 @@ npm run build:java
 The bot currently provides `/ping`, `/hello`, and `/info`.
 
 ### 3. Configure Secrets
+
 Set your Discord Application Public Key in Cloudflare Secrets:
 
 ```bash
@@ -47,6 +51,7 @@ npx wrangler secret put DISCORD_PUBLIC_KEY
 ```
 
 ### 4. Deploy to Cloudflare
+
 Build and deploy the worker, then register its slash commands:
 
 ```bash
@@ -54,6 +59,7 @@ npm run deploy
 ```
 
 ### 5. Register Slash Commands
+
 If you deploy with `npm run deploy`, registration is already included. To register separately, update the local, git-ignored `register.js` with your App ID and Bot Token, then run:
 
 ```bash
@@ -61,6 +67,7 @@ node register.js
 ```
 
 ### 📁 Project Structure
+
 ```text
 ├── src/
 │   ├── main/java/com/matthewtrefusis/
