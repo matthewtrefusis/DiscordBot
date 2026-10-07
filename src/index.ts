@@ -105,22 +105,19 @@ export default {
         );
       }
 
-      const signature = request.headers.get("x-signature-ed25519") || "";
-      const timestamp = request.headers.get("x-signature-timestamp") || "";
-
-      // Execute exported Java method
-      const result = exports.handleRequest(
-        body,
-        signature,
-        timestamp,
-        env.DISCORD_PUBLIC_KEY || "",
-      );
-
-      // If TeaVM returned a pointer integer instead of string, handle conversion
-      const responseJson =
-        typeof result === "string"
-          ? result
-          : '{"type": 4, "data": {"content": "🏓 Pong!"}}';
+      const commandName = interaction.data?.name;
+      const commandCode = { ping: 1, hello: 2, info: 3 }[commandName as
+        "ping" | "hello" | "info"] || 0;
+      const result = exports.handleRequest(commandCode);
+      const content = {
+        1: "🏓 Pong from Java TeaVM on Cloudflare Edge!",
+        2: "👋 Hello there from Cloudflare Workers!",
+        3: "🤖 **Bot Status:** Online | **Runtime:** Java 17 (TeaVM Wasm) on Cloudflare Edge",
+      }[result as 1 | 2 | 3] || `Unknown command: ${commandName || ""}`;
+      const responseJson = JSON.stringify({
+        type: 4,
+        data: { content },
+      });
 
       return new Response(responseJson, {
         headers: { "Content-Type": "application/json" },

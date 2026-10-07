@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "build:java": "set \"JAVA_HOME=C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.20.101-hotspot\" && set \"PATH=C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.20.101-hotspot\\bin;%PATH%\" && mvn clean package",
+    "deploy:worker": "npx wrangler deploy",
+    "register": "node register.js",
+    "deploy": "npm run build:java && npx wrangler deploy && node register.js"
+  }
+}
