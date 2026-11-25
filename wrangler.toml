@@ -6,3 +6,6 @@ compatibility_date = "2026-10-06"
 [[kv_namespaces]]
 binding = "FEEDBACK_CONFIG"
 id = "7c60ce1312344b5c9a49e0cf4e06e6f3"
+
+[triggers]
+crons = ["* * * * *"]

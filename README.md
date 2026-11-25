@@ -1,11 +1,11 @@
 # Discord Bot on Cloudflare Workers
 
-A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses Discord's HTTP Interactions API, so it does not need a continuously running process or a gateway connection.
+A serverless Discord bot built with TypeScript and Cloudflare Workers, offering anonymous categorized feedback, utility commands, and moderation through Discord's HTTP Interactions API—without a persistent gateway connection.
 
 ## Features
 
 - Ed25519 verification of every Discord interaction.
-- Slash commands for help, user profiles, timestamps, fun utilities, anonymous feedback, and moderation.
+- Slash commands for server details, polls, reminders, categorized anonymous feedback, utilities, and moderation.
 - A `GET` health check.
 - Runs directly on Cloudflare Workers.
 
@@ -17,6 +17,8 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 | `/hello` | None | Greets you by your Discord display name or username. |
 | `/info` | None | Shows the bot status and runtime. |
 | `/ping` | None | Checks that the bot is responding and replies with “Pong!”. |
+| `/serverinfo` | None | Shows details and approximate counts for this server. |
+| `/membercount` | None | Shows this server's approximate member count. |
 | `/userinfo` | Optional `user` | Shows a user's name, ID, and bot status. Defaults to you. |
 | `/avatar` | Optional `user` | Displays a user's avatar. Defaults to you. |
 | `/timestamp` | Required `seconds` | Formats Unix seconds as local and relative Discord timestamps. |
@@ -24,8 +26,11 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 | `/coinflip` | None | Flips a coin. |
 | `/choose` | Required `choices` | Chooses from comma-separated options (up to 25). |
 | `/8ball` | Required `question` | Gives a randomized 8-ball answer. |
-| `/feedback` | Required `message` | Sends anonymous feedback to this server's configured channel. |
-| `/setup-feedback` | Required `channel` (Manage Server) | Set this server's feedback destination. |
+| `/feedback` | Required `category`, `message` | Sends anonymous, categorized feedback to this server's configured channel. |
+| `/setup-feedback` | Required `channel`, comma-separated `categories` (Manage Server) | Set this server's feedback destination and available categories. |
+| `/feedback-config` | None (Manage Server) | Shows the configured feedback channel and categories. |
+| `/poll` | Required `question`, comma-separated `options` (2–5) | Posts a poll; voters can change their choice. |
+| `/remind` | Required `minutes` (1–512,640), `message` | Sends you a private reminder by DM, up to 356 days later. |
 | `/kick` | Required `user`, optional `reason` (Kick Members) | Remove a member from the server. |
 | `/ban` | Required `user`, optional `reason` (Ban Members) | Ban a member from the server. |
 | `/unban` | Required `user_id`, optional `reason` (Ban Members) | Unban a user by Discord ID. |
@@ -36,6 +41,8 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 Moderation responses are only visible to the moderator who ran the command. The bot needs the corresponding Discord permissions, and its role must be higher than members it moderates. `/purge` also needs View Channel and Read Message History; messages older than 14 days are skipped because Discord does not allow them in bulk deletion.
 
 Feedback is posted by the bot without the submitter's username or ID, and the Worker does not store or log the feedback text. This is anonymous to people reading the feedback channel, not to Discord or Cloudflare; users should avoid including identifying details in their message.
+
+Poll options, vote counts, and voter IDs are stored in Cloudflare KV so voters can change their choice. Reminder text, recipient IDs, and due times are also stored in KV until delivery. A once-per-minute Cron Trigger sends reminders by DM and retries failed deliveries up to five times; users must allow DMs from the bot.
 
 ## Requirements
 
@@ -81,7 +88,7 @@ npm run dev
 
 The local URL's `GET /` route is a health check. For Discord to send interactions to a local Worker, expose it through a secure tunnel and configure that public URL as the application's **Interactions Endpoint URL**.
 
-After adding the bot to a server, a member with **Manage Server** permission can run `/setup-feedback channel:#your-private-channel`. The selection is saved per server in Cloudflare KV.
+After adding the bot to a server, a member with **Manage Server** permission can run `/setup-feedback channel:#your-private-channel categories:Bug,Suggestion,Other`. The destination and category list are saved per server in Cloudflare KV. `/feedback` offers configured categories as you type; feedback is rejected if its category is no longer configured.
 
 ## Deploy
 
@@ -100,7 +107,7 @@ npx wrangler secret put DISCORD_BOT_TOKEN
 npm run deploy
 ```
 
-After deployment, run `/setup-feedback` in each server to select its private channel.
+The Worker uses a once-per-minute Cron Trigger for reminders. After deployment, run `/setup-feedback` in each server to select its private feedback channel and categories.
 
 Set the deployed Worker URL as the application's **Interactions Endpoint URL** in the Discord Developer Portal. Discord validates the endpoint with a signed `PING` request.
 
@@ -116,19 +123,27 @@ Set the deployed Worker URL as the application's **Interactions Endpoint URL** i
 │   │   ├── coinflip.ts
 │   │   ├── eightball.ts
 │   │   ├── feedback.ts
+│   │   ├── feedback-config.ts
+│   │   ├── feedback-settings.ts
+│   │   ├── guild-info.ts
 │   │   ├── hello.ts
 │   │   ├── help.ts
 │   │   ├── helpers.ts
 │   │   ├── info.ts
 │   │   ├── index.ts
+│   │   ├── membercount.ts
 │   │   ├── ping.ts
+│   │   ├── poll.ts
 │   │   ├── random.ts
+│   │   ├── remind.ts
 │   │   ├── roll.ts
 │   │   ├── setup-feedback.ts
+│   │   ├── serverinfo.ts
 │   │   ├── timestamp.ts
 │   │   ├── userinfo.ts
 │   │   └── types.ts
-│   └── index.ts               # Worker routes, signature verification, command dispatch
+│   ├── index.ts               # Worker routes, verification, command dispatch, Cron Trigger
+│   └── reminders.ts           # Scheduled reminder delivery
 ├── package.json
 ├── tsconfig.json
 └── wrangler.toml

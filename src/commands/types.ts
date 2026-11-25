@@ -5,7 +5,21 @@ export interface CommandEnvironment {
 
 export interface KeyValueStore {
   get(key: string): Promise<string | null>;
-  put(key: string, value: string): Promise<void>;
+  put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number },
+  ): Promise<void>;
+  delete(key: string): Promise<void>;
+  list(options?: {
+    prefix?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<{
+    keys: { name: string }[];
+    list_complete: boolean;
+    cursor?: string;
+  }>;
 }
 
 export interface CommandContext {
@@ -20,6 +34,16 @@ export interface CommandResponse {
   backgroundTask?: Promise<string>;
 }
 
+export interface AutocompleteChoice {
+  name: string;
+  value: string;
+}
+
+export interface InteractionCallback {
+  type: 4 | 7;
+  data: Record<string, unknown>;
+}
+
 export type CommandResult = string | CommandResponse;
 
 export interface CommandOption {
@@ -32,6 +56,7 @@ export interface CommandOption {
   min_length?: number;
   max_length?: number;
   channel_types?: number[];
+  autocomplete?: boolean;
 }
 
 export interface DiscordCommand {
@@ -39,6 +64,8 @@ export interface DiscordCommand {
   description: string;
   options?: CommandOption[];
   default_member_permissions?: string;
+  autocomplete?(context: CommandContext): Promise<AutocompleteChoice[]>;
+  component?(context: CommandContext): Promise<InteractionCallback>;
   execute(context: CommandContext): CommandResult | Promise<CommandResult>;
 }
 

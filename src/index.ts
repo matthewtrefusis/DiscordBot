@@ -1,9 +1,12 @@
 import { commandsByName } from "./commands/index";
 import type {
+  AutocompleteChoice,
   CommandContext,
   CommandEnvironment,
+  InteractionCallback,
   WorkerExecutionContext,
 } from "./commands/types";
+import { processDueReminders } from "./reminders";
 
 export interface Env extends CommandEnvironment {
   DISCORD_PUBLIC_KEY: string;
@@ -88,6 +91,14 @@ function interactionResponse(content: string, ephemeral = false): Response {
 
 function deferredResponse(): Response {
   return jsonResponse({ type: 5, data: { flags: 64 } });
+}
+
+function autocompleteResponse(choices: AutocompleteChoice[]): Response {
+  return jsonResponse({ type: 8, data: { choices } });
+}
+
+function componentResponse(response: InteractionCallback): Response {
+  return jsonResponse(response);
 }
 
 async function sendInteractionFollowup(
@@ -178,7 +189,32 @@ export default {
       return jsonResponse({ type: 1 });
     }
 
-    if (interaction.type !== 2) {
+    if (interaction.type === 3) {
+      const data = interaction.data;
+      const customId = isRecord(data) ? data.custom_id : undefined;
+      const commandName = typeof customId === "string"
+        ? customId.split(":", 1)[0]
+        : "";
+      const command = commandsByName.get(commandName);
+      if (!command?.component) {
+        return componentResponse({
+          type: 4,
+          data: {
+            content: "This interaction is not supported.",
+            flags: 64,
+            allowed_mentions: { parse: [] },
+          },
+        });
+      }
+      const context: CommandContext = {
+        env,
+        interaction,
+        username: getUsername(interaction),
+      };
+      return componentResponse(await command.component(context));
+    }
+
+    if (interaction.type !== 2 && interaction.type !== 4) {
       return jsonResponse({ error: "Unsupported interaction type." }, 400);
     }
 
@@ -189,6 +225,9 @@ export default {
 
     const command = commandsByName.get(data.name);
     if (!command) {
+      if (interaction.type === 4) {
+        return autocompleteResponse([]);
+      }
       return interactionResponse(`Unknown command: ${data.name}`);
     }
     const context: CommandContext = {
@@ -196,6 +235,13 @@ export default {
       interaction,
       username: getUsername(interaction),
     };
+    if (interaction.type === 4) {
+      if (!command.autocomplete) {
+        return autocompleteResponse([]);
+      }
+      return autocompleteResponse(await command.autocomplete(context));
+    }
+
     const result = await command.execute(context);
     if (typeof result === "string") {
       return interactionResponse(result);
@@ -219,5 +265,20 @@ export default {
     }
 
     return interactionResponse(result.content, result.ephemeral);
+  },
+  async scheduled(
+    controller: { scheduledTime: number },
+    env: Env,
+    executionContext: WorkerExecutionContext,
+  ): Promise<void> {
+    const task = processDueReminders(env, controller.scheduledTime).catch(
+      (error: unknown) => {
+        console.error(
+          "Scheduled reminder processing failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      },
+    );
+    executionContext.waitUntil(task);
   },
 };

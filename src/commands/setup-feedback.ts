@@ -1,27 +1,33 @@
 import { getOption, isRecord } from "./helpers";
+import {
+  canManageFeedback,
+  feedbackSettingsKey,
+} from "./feedback-settings";
 import type { DiscordCommand } from "./types";
 
-const MANAGE_GUILD = 32n;
-const ADMINISTRATOR = 8n;
-
-function canManageFeedback(interaction: Record<string, unknown>): boolean {
-  const member = interaction.member;
-  if (!isRecord(member)) {
-    return false;
+function parseCategories(value: unknown): string[] | null {
+  if (typeof value !== "string") {
+    return null;
   }
 
-  const permissions = member.permissions;
-  if (typeof permissions !== "string" || !/^\d+$/.test(permissions)) {
-    return false;
+  const categories = value.split(",").map((category) => category.trim());
+  if (
+    categories.length === 0 ||
+    categories.length > 25 ||
+    categories.some((category) => category.length === 0 || category.length > 100)
+  ) {
+    return null;
   }
 
-  const value = BigInt(permissions);
-  return (value & (MANAGE_GUILD | ADMINISTRATOR)) !== 0n;
+  const normalizedCategories = new Set(
+    categories.map((category) => category.toLowerCase()),
+  );
+  return normalizedCategories.size === categories.length ? categories : null;
 }
 
 const setupFeedbackCommand = {
   name: "setup-feedback",
-  description: "Choose the private channel for anonymous server feedback.",
+  description: "Configure the destination and categories for anonymous feedback.",
   default_member_permissions: "32",
   options: [
     {
@@ -30,6 +36,13 @@ const setupFeedbackCommand = {
       description: "The channel where anonymous feedback will be posted.",
       required: true,
       channel_types: [0, 5],
+    },
+    {
+      type: 3,
+      name: "categories",
+      description: "Comma-separated category names (1-25 categories).",
+      required: true,
+      max_length: 6000,
     },
   ],
   execute: async ({ env, interaction }) => {
@@ -55,6 +68,14 @@ const setupFeedbackCommand = {
     }
 
     const channelId = getOption(interaction, "channel");
+    const categories = parseCategories(getOption(interaction, "categories"));
+    if (!categories) {
+      return {
+        content: "Provide 1–25 unique category names, each 1–100 characters, separated by commas.",
+        ephemeral: true,
+      };
+    }
+
     const data = interaction.data;
     const resolved = isRecord(data) ? data.resolved : undefined;
     const channels = isRecord(resolved) ? resolved.channels : undefined;
@@ -76,7 +97,10 @@ const setupFeedbackCommand = {
     }
 
     try {
-      await env.FEEDBACK_CONFIG.put(`feedback-channel:${guildId}`, channelId);
+      await env.FEEDBACK_CONFIG.put(
+        feedbackSettingsKey(guildId),
+        JSON.stringify({ channelId, categories }),
+      );
     } catch (error) {
       console.error(
         "Could not save the feedback channel configuration:",
@@ -88,7 +112,7 @@ const setupFeedbackCommand = {
       };
     }
     return {
-      content: `Anonymous feedback will be sent to <#${channelId}>.`,
+      content: `Anonymous feedback will be sent to <#${channelId}>. Configured ${categories.length} categories.`,
       ephemeral: true,
     };
   },

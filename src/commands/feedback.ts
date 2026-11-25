@@ -1,8 +1,13 @@
-import { getOption } from "./helpers";
+import { getOption, isRecord } from "./helpers";
+import {
+  readFeedbackSettings,
+  type FeedbackSettings,
+} from "./feedback-settings";
 import type { DiscordCommand } from "./types";
 
 async function deliverFeedback(
   message: string,
+  category: string,
   botToken: string,
   channelId: string,
 ): Promise<string> {
@@ -16,7 +21,7 @@ async function deliverFeedback(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          content: `**Anonymous feedback**\n${message}`,
+          content: `**Anonymous feedback · ${category}**\n${message}`,
           allowed_mentions: { parse: [] },
         }),
       },
@@ -39,8 +44,15 @@ async function deliverFeedback(
 
 const feedbackCommand = {
   name: "feedback",
-  description: "Send anonymous feedback to the server's feedback channel.",
+  description: "Send categorized anonymous feedback to this server.",
   options: [
+    {
+      type: 3,
+      name: "category",
+      description: "The category for your feedback.",
+      required: true,
+      autocomplete: true,
+    },
     {
       type: 3,
       name: "message",
@@ -50,8 +62,45 @@ const feedbackCommand = {
       max_length: 1000,
     },
   ],
+  autocomplete: async ({ env, interaction }) => {
+    const guildId = interaction.guild_id;
+    if (typeof guildId !== "string" || !env.FEEDBACK_CONFIG) {
+      return [];
+    }
+
+    try {
+      const settings = await readFeedbackSettings(env, guildId);
+      if (!settings) {
+        return [];
+      }
+
+      const data = interaction.data;
+      const options = isRecord(data) && Array.isArray(data.options)
+        ? data.options
+        : [];
+      const focusedOption = options.find(
+        (option) => isRecord(option) && option.focused === true,
+      );
+      const input = isRecord(focusedOption) &&
+          typeof focusedOption.value === "string"
+        ? focusedOption.value.toLowerCase()
+        : "";
+
+      return settings.categories
+        .filter((category) => category.toLowerCase().includes(input))
+        .slice(0, 25)
+        .map((category) => ({ name: category, value: category }));
+    } catch (error) {
+      console.error(
+        "Could not load feedback categories:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return [];
+    }
+  },
   execute: async ({ env, interaction }) => {
     const message = getOption(interaction, "message");
+    const category = getOption(interaction, "category");
     const trimmedMessage = typeof message === "string" ? message.trim() : "";
     const guildId = interaction.guild_id;
     const botToken = env.DISCORD_BOT_TOKEN;
@@ -75,9 +124,16 @@ const feedbackCommand = {
       };
     }
 
-    let channelId: string | null;
+    if (typeof category !== "string" || category.length === 0) {
+      return {
+        content: "Choose a feedback category before submitting.",
+        ephemeral: true,
+      };
+    }
+
+    let settings: FeedbackSettings | null;
     try {
-      channelId = await env.FEEDBACK_CONFIG.get(`feedback-channel:${guildId}`);
+      settings = await readFeedbackSettings(env, guildId);
     } catch (error) {
       console.error(
         "Could not read the feedback channel configuration:",
@@ -88,9 +144,25 @@ const feedbackCommand = {
         ephemeral: true,
       };
     }
-    if (!channelId || !/^\d{17,20}$/.test(channelId)) {
+    if (!settings) {
       return {
         content: "Feedback has not been set up yet. Ask a server admin to run `/setup-feedback`.",
+        ephemeral: true,
+      };
+    }
+    if (settings.categories.length === 0) {
+      return {
+        content: "Feedback categories have not been set up yet. Ask a server admin to run `/setup-feedback`.",
+        ephemeral: true,
+      };
+    }
+
+    const configuredCategory = settings.categories.find(
+      (configured) => configured.toLowerCase() === category.toLowerCase(),
+    );
+    if (!configuredCategory) {
+      return {
+        content: "That feedback category is no longer available. Choose a configured category or ask an admin to run `/setup-feedback`.",
         ephemeral: true,
       };
     }
@@ -100,8 +172,9 @@ const feedbackCommand = {
       ephemeral: true,
       backgroundTask: deliverFeedback(
         trimmedMessage,
+        configuredCategory,
         botToken,
-        channelId,
+        settings.channelId,
       ),
     };
   },

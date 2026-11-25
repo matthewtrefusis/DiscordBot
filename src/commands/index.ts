@@ -4,13 +4,18 @@ import chooseCommand from "./choose";
 import coinflipCommand from "./coinflip";
 import eightballCommand from "./eightball";
 import feedbackCommand from "./feedback";
+import feedbackConfigCommand from "./feedback-config";
 import helloCommand from "./hello";
 import helpCommand from "./help";
 import infoCommand from "./info";
 import kickCommand from "./kick";
+import membercountCommand from "./membercount";
 import pingCommand from "./ping";
+import pollCommand from "./poll";
 import purgeCommand from "./purge";
+import remindCommand from "./remind";
 import rollCommand from "./roll";
+import serverinfoCommand from "./serverinfo";
 import setupFeedbackCommand from "./setup-feedback";
 import timestampCommand from "./timestamp";
 import timeoutCommand from "./timeout";
@@ -32,7 +37,12 @@ export const commands: DiscordCommand[] = [
   chooseCommand,
   eightballCommand,
   feedbackCommand,
+  feedbackConfigCommand,
   setupFeedbackCommand,
+  serverinfoCommand,
+  membercountCommand,
+  pollCommand,
+  remindCommand,
   kickCommand,
   banCommand,
   unbanCommand,
