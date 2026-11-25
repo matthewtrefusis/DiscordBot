@@ -1,7 +1,11 @@
 import { commandsByName } from "./commands/index";
-import type { CommandContext } from "./commands/types";
+import type {
+  CommandContext,
+  CommandEnvironment,
+  WorkerExecutionContext,
+} from "./commands/types";
 
-export interface Env {
+export interface Env extends CommandEnvironment {
   DISCORD_PUBLIC_KEY: string;
 }
 
@@ -71,14 +75,46 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
-function interactionResponse(content: string): Response {
+function interactionResponse(content: string, ephemeral = false): Response {
   return jsonResponse({
     type: 4,
     data: {
       content,
       allowed_mentions: { parse: [] },
+      ...(ephemeral ? { flags: 64 } : {}),
     },
   });
+}
+
+function deferredResponse(): Response {
+  return jsonResponse({ type: 5, data: { flags: 64 } });
+}
+
+async function sendInteractionFollowup(
+  interaction: JsonRecord,
+  content: string,
+): Promise<void> {
+  const applicationId = interaction.application_id;
+  const token = interaction.token;
+  if (typeof applicationId !== "string" || typeof token !== "string") {
+    throw new Error("Interaction is missing follow-up credentials.");
+  }
+
+  const response = await fetch(
+    `https://discord.com/api/v10/webhooks/${encodeURIComponent(applicationId)}/${encodeURIComponent(token)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content,
+        flags: 64,
+        allowed_mentions: { parse: [] },
+      }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Interaction follow-up failed with HTTP ${response.status}.`);
+  }
 }
 
 function getUsername(interaction: JsonRecord): string {
@@ -100,7 +136,11 @@ function getUsername(interaction: JsonRecord): string {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    executionContext: WorkerExecutionContext,
+  ): Promise<Response> {
     if (request.method === "GET") {
       return jsonResponse({ status: "ok", service: "discord-bot" });
     }
@@ -152,9 +192,32 @@ export default {
       return interactionResponse(`Unknown command: ${data.name}`);
     }
     const context: CommandContext = {
+      env,
       interaction,
       username: getUsername(interaction),
     };
-    return interactionResponse(command.execute(context));
+    const result = await command.execute(context);
+    if (typeof result === "string") {
+      return interactionResponse(result);
+    }
+
+    if (result.backgroundTask) {
+      const task = result.backgroundTask
+        .then((content) => sendInteractionFollowup(interaction, content))
+        .catch((error: unknown) => {
+          console.error(
+            "Deferred command failed:",
+            error instanceof Error ? error.message : String(error),
+          );
+          return sendInteractionFollowup(
+            interaction,
+            "Your request could not be completed. Please try again later.",
+          );
+        });
+      executionContext.waitUntil(task);
+      return deferredResponse();
+    }
+
+    return interactionResponse(result.content, result.ephemeral);
   },
 };

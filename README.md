@@ -5,7 +5,7 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 ## Features
 
 - Ed25519 verification of every Discord interaction.
-- Slash commands for help, user profiles, timestamps, and fun utilities.
+- Slash commands for help, user profiles, timestamps, fun utilities, and anonymous feedback.
 - A `GET` health check.
 - Runs directly on Cloudflare Workers with no Java, Maven, or WebAssembly build.
 
@@ -24,8 +24,12 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 | `/coinflip` | None | Flips a coin. |
 | `/choose` | Required `choices` | Chooses from comma-separated options (up to 25). |
 | `/8ball` | Required `question` | Gives a randomized 8-ball answer. |
+| `/feedback` | Required `message` | Sends anonymous feedback to this server's configured channel. |
+| `/setup-feedback` | Required `channel` (Manage Server) | Set this server's feedback destination. |
 
 This starter set focuses on stateless utility and fun commands; moderation and reminders are not included.
+
+Feedback is posted by the bot without the submitter's username or ID, and the Worker does not store or log the feedback text. This is anonymous to people reading the feedback channel, not to Discord or Cloudflare; users should avoid including identifying details in their message.
 
 ## Requirements
 
@@ -42,7 +46,7 @@ npm ci
 npm run typecheck
 ```
 
-In the [Discord Developer Portal](https://discord.com/developers/applications), create or select your application. Copy its **Application ID**, **Public Key**, and bot token. Keep the bot token private; it is only needed by the local slash-command registration script.
+In the [Discord Developer Portal](https://discord.com/developers/applications), create or select your application. Copy its **Application ID**, **Public Key**, and bot token. Keep the bot token private; it is used locally to register commands and as a Worker secret to deliver feedback.
 
 ## Register slash commands
 
@@ -56,10 +60,11 @@ The script registers every command listed above by reading the shared command re
 
 ## Run locally
 
-Copy `.dev.vars.example` to `.dev.vars` and add your Discord application public key. The file is git-ignored:
+Create a private feedback channel and give the bot permission to view the channel and send messages there. Copy `.dev.vars.example` to `.dev.vars`, then fill in the Discord application public key and bot token. The file is git-ignored:
 
 ```dotenv
 DISCORD_PUBLIC_KEY=your-discord-application-public-key
+DISCORD_BOT_TOKEN=your-discord-bot-token
 ```
 
 Then start the local Worker:
@@ -70,15 +75,26 @@ npm run dev
 
 The local URL's `GET /` route is a health check. For Discord to send interactions to a local Worker, expose it through a secure tunnel and configure that public URL as the application's **Interactions Endpoint URL**.
 
+After adding the bot to a server, a member with **Manage Server** permission can run `/setup-feedback channel:#your-private-channel`. The selection is saved per server in Cloudflare KV.
+
 ## Deploy
 
 Authenticate Wrangler and save the Discord public key as a Worker secret:
 
 ```sh
 npx wrangler login
+npx wrangler kv namespace create FEEDBACK_CONFIG
+```
+
+Replace `REPLACE_WITH_KV_NAMESPACE_ID` in `wrangler.toml` with the ID printed by Wrangler. Keep this namespace ID for future deploys so server settings persist. Then set the Worker secrets and deploy:
+
+```sh
 npx wrangler secret put DISCORD_PUBLIC_KEY
+npx wrangler secret put DISCORD_BOT_TOKEN
 npm run deploy
 ```
+
+After deployment, run `/setup-feedback` in each server to select its private channel.
 
 Set the deployed Worker URL as the application's **Interactions Endpoint URL** in the Discord Developer Portal. Discord validates the endpoint with a signed `PING` request.
 
@@ -93,6 +109,7 @@ Set the deployed Worker URL as the application's **Interactions Endpoint URL** i
 │   │   ├── choose.ts
 │   │   ├── coinflip.ts
 │   │   ├── eightball.ts
+│   │   ├── feedback.ts
 │   │   ├── hello.ts
 │   │   ├── help.ts
 │   │   ├── helpers.ts
@@ -101,6 +118,7 @@ Set the deployed Worker URL as the application's **Interactions Endpoint URL** i
 │   │   ├── ping.ts
 │   │   ├── random.ts
 │   │   ├── roll.ts
+│   │   ├── setup-feedback.ts
 │   │   ├── timestamp.ts
 │   │   ├── userinfo.ts
 │   │   └── types.ts

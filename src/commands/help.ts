@@ -11,6 +11,9 @@ const helpCommand = {
       "`/avatar [user]`, `/userinfo [user]`, `/timestamp seconds`",
       "**Fun**",
       "`/8ball question`, `/choose choices`, `/coinflip`, `/roll [min] [max]`",
+      "**Feedback**",
+      "`/feedback message`",
+      "`/setup-feedback channel` (Manage Server)",
     ].join("\n"),
 } satisfies DiscordCommand;
 

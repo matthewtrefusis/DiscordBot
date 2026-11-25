@@ -29,7 +29,12 @@ function signedRequest(interaction) {
   });
 }
 
-async function runCommand(name, options = []) {
+async function runCommand(
+  name,
+  options = [],
+  envOverrides = {},
+  executionContext,
+) {
   const response = await worker.fetch(
     signedRequest({
       type: 2,
@@ -43,7 +48,8 @@ async function runCommand(name, options = []) {
         },
       },
     }),
-    { DISCORD_PUBLIC_KEY: publicKeyHex },
+    { DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides },
+    executionContext,
   );
   assert.equal(response.status, 200);
   return response.json();
@@ -129,6 +135,142 @@ test("runs the help, profile, timestamp, and fun commands", async () => {
     { name: "question", value: "Will the tests pass?" },
   ]);
   assert.match(eightball.data.content, /^🎱 /);
+});
+
+test("lets a server manager choose the feedback channel", async () => {
+  const savedSettings = new Map();
+  const response = await worker.fetch(
+    signedRequest({
+      type: 2,
+      guild_id: "guild-id",
+      data: {
+        name: "setup-feedback",
+        options: [{ name: "channel", value: "987654321098765432" }],
+        resolved: {
+          channels: {
+            "987654321098765432": {
+              type: 0,
+              guild_id: "guild-id",
+            },
+          },
+        },
+      },
+      member: { permissions: "32" },
+    }),
+    {
+      DISCORD_PUBLIC_KEY: publicKeyHex,
+      FEEDBACK_CONFIG: {
+        get: async (key) => savedSettings.get(key) ?? null,
+        put: async (key, value) => savedSettings.set(key, value),
+      },
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(payload.type, 4);
+  assert.equal(payload.data.flags, 64);
+  assert.equal(
+    savedSettings.get("feedback-channel:guild-id"),
+    "987654321098765432",
+  );
+});
+
+test("rejects feedback setup by members without Manage Server", async () => {
+  let stored = false;
+  const response = await worker.fetch(
+    signedRequest({
+      type: 2,
+      guild_id: "guild-id",
+      data: {
+        name: "setup-feedback",
+        options: [{ name: "channel", value: "987654321098765432" }],
+        resolved: {
+          channels: {
+            "987654321098765432": { type: 0, guild_id: "guild-id" },
+          },
+        },
+      },
+      member: { permissions: "0" },
+    }),
+    {
+      DISCORD_PUBLIC_KEY: publicKeyHex,
+      FEEDBACK_CONFIG: {
+        get: async () => null,
+        put: async () => {
+          stored = true;
+        },
+      },
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(payload.data.flags, 64);
+  assert.match(payload.data.content, /Manage Server/);
+  assert.equal(stored, false);
+});
+
+test("delivers feedback without including the submitter's identity", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 200 });
+  };
+
+  try {
+    const response = await worker.fetch(
+      signedRequest({
+        type: 2,
+        guild_id: "guild-id",
+        application_id: "application-id",
+        token: "interaction-token",
+        data: {
+          name: "feedback",
+          options: [
+            {
+              name: "message",
+              value: "Please improve the welcome channel @everyone",
+            },
+          ],
+        },
+        member: {
+          user: {
+            id: "123456789012345678",
+            username: "test-user",
+            global_name: "Test User",
+          },
+        },
+      }),
+      {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: {
+          get: async (key) => {
+            assert.equal(key, "feedback-channel:guild-id");
+            return "987654321098765432";
+          },
+          put: async () => {},
+        },
+      },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+    );
+
+    assert.deepEqual(await response.json(), { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    assert.equal(requests.length, 2);
+
+    const postedMessage = JSON.parse(requests[0].options.body);
+    assert.match(postedMessage.content, /Please improve the welcome channel/);
+    assert.doesNotMatch(postedMessage.content, /Test User|test-user|123456789012345678/);
+    assert.deepEqual(postedMessage.allowed_mentions, { parse: [] });
+
+    const followup = JSON.parse(requests[1].options.body);
+    assert.match(followup.content, /submitted anonymously/);
+    assert.equal(followup.flags, 64);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("rejects a request whose body was changed after signing", async () => {
