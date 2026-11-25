@@ -1,83 +1,111 @@
-# ⚡ Java Wasm Discord Bot on Cloudflare Workers
+# Discord Bot on Cloudflare Workers
 
-A lightweight, high-performance Discord bot written in **Java 17**, compiled directly to **WebAssembly (Wasm)** via **TeaVM**, and deployed globally on **Cloudflare Workers** using the HTTP Interactions API.
+A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses Discord's HTTP Interactions API, so it does not need a continuously running process or a gateway connection.
 
----
+## Features
 
-## ✨ Features
+- Ed25519 verification of every Discord interaction.
+- Slash commands for help, user profiles, timestamps, and fun utilities.
+- A `GET` health check.
+- Runs directly on Cloudflare Workers with no Java, Maven, or WebAssembly build.
 
-- **Java on the Edge:** Write bot logic in pure Java while running on Cloudflare's serverless V8 edge isolates.
-- **WebAssembly Powered:** Compiled using TeaVM for low-latency cold starts and fast execution.
-- **Serverless & Cost-Effective:** Operates strictly on Discord's HTTP Interactions API (no 24/7 WebSockets or paid VPS required).
-- **Secure:** Built-in Ed25519 cryptographic signature verification using the Web Crypto API.
+## Commands
 
----
+| Command | Arguments | Description |
+| --- | --- | --- |
+| `/help` | None | Lists all available commands. |
+| `/hello` | None | Greets you by your Discord display name or username. |
+| `/info` | None | Shows the bot status and runtime. |
+| `/ping` | None | Checks that the bot is responding and replies with “Pong!”. |
+| `/userinfo` | Optional `user` | Shows a user's name, ID, and bot status. Defaults to you. |
+| `/avatar` | Optional `user` | Displays a user's avatar. Defaults to you. |
+| `/timestamp` | Required `seconds` | Formats Unix seconds as local and relative Discord timestamps. |
+| `/roll` | Optional `min`, `max` | Rolls within a range; defaults to 1–100. |
+| `/coinflip` | None | Flips a coin. |
+| `/choose` | Required `choices` | Chooses from comma-separated options (up to 25). |
+| `/8ball` | Required `question` | Gives a randomized 8-ball answer. |
 
-## 🛠️ Tech Stack
+This starter set focuses on stateless utility and fun commands; moderation and reminders are not included.
 
-- **Language:** Java 17
-- **Compiler:** TeaVM (Java Bytecode ➔ WebAssembly)
-- **Runtime / Hosting:** Cloudflare Workers (TypeScript / Edge Runtime)
-- **Build System:** Maven
-- **Deployment:** Wrangler CLI
+## Requirements
 
----
+- Node.js 22 or newer and npm.
+- A Cloudflare account.
+- A Discord application with a bot and slash commands enabled.
 
-## 🚀 Quick Start
+## Setup
 
-### 1. Prerequisites
+Install dependencies and check the TypeScript:
 
-- [Node.js](https://nodejs.org/) & [npm](https://www.npmjs.com/)
-- [Java 17 SDK](https://adoptium.net/)
-- [Apache Maven](https://maven.apache.org/)
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
-
-### 2. Build the WebAssembly Binary
-
-Compile your Java code into `.wasm` artifacts. The npm script selects the installed Java 17 JDK on Windows:
-
-```bash
-npm run build:java
+```sh
+npm ci
+npm run typecheck
 ```
 
-The bot currently provides `/ping`, `/hello`, and `/info`.
+In the [Discord Developer Portal](https://discord.com/developers/applications), create or select your application. Copy its **Application ID**, **Public Key**, and bot token. Keep the bot token private; it is only needed by the local slash-command registration script.
 
-### 3. Configure Secrets
+## Register slash commands
 
-Set your Discord Application Public Key in Cloudflare Secrets:
+Copy `.env.example` to `.env` and fill in the application ID and bot token. Optionally set a guild ID to register commands to one server for faster testing; without it, commands are registered globally.
 
-```bash
+```sh
+npm run register
+```
+
+The script registers every command listed above by reading the shared command registry. It bulk-overwrites this application's commands of the selected scope.
+
+## Run locally
+
+Copy `.dev.vars.example` to `.dev.vars` and add your Discord application public key. The file is git-ignored:
+
+```dotenv
+DISCORD_PUBLIC_KEY=your-discord-application-public-key
+```
+
+Then start the local Worker:
+
+```sh
+npm run dev
+```
+
+The local URL's `GET /` route is a health check. For Discord to send interactions to a local Worker, expose it through a secure tunnel and configure that public URL as the application's **Interactions Endpoint URL**.
+
+## Deploy
+
+Authenticate Wrangler and save the Discord public key as a Worker secret:
+
+```sh
+npx wrangler login
 npx wrangler secret put DISCORD_PUBLIC_KEY
-```
-
-### 4. Deploy to Cloudflare
-
-Build and deploy the worker, then register its slash commands:
-
-```bash
 npm run deploy
 ```
 
-### 5. Register Slash Commands
+Set the deployed Worker URL as the application's **Interactions Endpoint URL** in the Discord Developer Portal. Discord validates the endpoint with a signed `PING` request.
 
-If you deploy with `npm run deploy`, registration is already included. To register separately, update the local, git-ignored `register.js` with your App ID and Bot Token, then run:
-
-```bash
-node register.js
-```
-
-### 📁 Project Structure
+## Project structure
 
 ```text
+├── scripts/
+│   └── register-commands.mjs  # Register slash commands through Discord's REST API
 ├── src/
-│   ├── main/java/com/matthewtrefusis/
-│   │   └── DiscordWorker.java     # Core Java bot logic & @Export endpoints
-│   ├── index.ts                   # TypeScript edge worker & Ed25519 verification
-│   ├── wasm.d.ts                  # Wasm module declarations
-├── package.json                   # Build, deploy, and registration scripts
-├── tsconfig.json                  # TypeScript project configuration
-├── dist/                          # Compiled Wasm build output
-├── pom.xml                        # Maven & TeaVM plugin configuration
-├── wrangler.toml                  # Cloudflare Workers configuration
-└── register.js                    # Discord REST API command registration
+│   ├── commands/
+│   │   ├── avatar.ts
+│   │   ├── choose.ts
+│   │   ├── coinflip.ts
+│   │   ├── eightball.ts
+│   │   ├── hello.ts
+│   │   ├── help.ts
+│   │   ├── helpers.ts
+│   │   ├── info.ts
+│   │   ├── index.ts
+│   │   ├── ping.ts
+│   │   ├── random.ts
+│   │   ├── roll.ts
+│   │   ├── timestamp.ts
+│   │   ├── userinfo.ts
+│   │   └── types.ts
+│   └── index.ts               # Worker routes, signature verification, command dispatch
+├── package.json
+├── tsconfig.json
+└── wrangler.toml
 ```

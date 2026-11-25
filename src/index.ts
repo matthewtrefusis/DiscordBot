@@ -1,42 +1,34 @@
-import wasmModule from "../dist/classes.wasm";
+import { commandsByName } from "./commands/index";
+import type { CommandContext } from "./commands/types";
 
 export interface Env {
   DISCORD_PUBLIC_KEY: string;
 }
 
-// 1. Explicit TeaVM imports required by the WebAssembly module
-const teavmImports: WebAssembly.Imports = {
-  teavm: {
-    currentTimeMillis: () => Date.now(),
-    logChar: (c: number) => console.log(String.fromCharCode(c)),
-    logInt: (i: number) => console.log(i),
-    logString: (s: any) => console.log(s),
-    putchar: (c: number) => console.log(String.fromCharCode(c)),
-    logOutOfMemory: () => console.error("TeaVM Out Of Memory Error"),
-  },
-  teavmMath: Math as unknown as Record<string, WebAssembly.ImportValue>,
-};
+type JsonRecord = Record<string, unknown>;
 
-// 2. Cache the WebAssembly instance globally to speed up cold starts
-let wasmInstancePromise: Promise<WebAssembly.Instance> | null = null;
-
-async function getWasmInstance(): Promise<WebAssembly.Instance> {
-  if (!wasmInstancePromise) {
-    wasmInstancePromise = WebAssembly.instantiate(wasmModule, teavmImports);
-  }
-  return wasmInstancePromise;
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Convert Hex string to Uint8Array
-function hexToUint8Array(hex: string): Uint8Array {
-  const buf = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    buf[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+function hexToBytes(
+  hex: string,
+  byteLength: number,
+): Uint8Array<ArrayBuffer> | null {
+  if (
+    hex.length !== byteLength * 2 ||
+    !/^[0-9a-f]+$/i.test(hex)
+  ) {
+    return null;
   }
-  return buf;
+
+  const bytes = new Uint8Array(new ArrayBuffer(byteLength));
+  for (let i = 0; i < byteLength; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
 }
 
-// Verify Ed25519 signature sent by Discord
 async function verifyDiscordRequest(
   request: Request,
   body: string,
@@ -44,96 +36,125 @@ async function verifyDiscordRequest(
 ): Promise<boolean> {
   const signature = request.headers.get("x-signature-ed25519");
   const timestamp = request.headers.get("x-signature-timestamp");
-
-  if (!signature || !timestamp || !publicKeyHex) return false;
-
-  try {
-    const key = await crypto.subtle.importKey(
-      "raw",
-      hexToUint8Array(publicKeyHex) as BufferSource,
-      { name: "NODE-ED25519", namedCurve: "NODE-ED25519" },
-      false,
-      ["verify"],
-    );
-
-    const encoder = new TextEncoder();
-    return await crypto.subtle.verify(
-      "NODE-ED25519",
-      key,
-      hexToUint8Array(signature) as BufferSource,
-      encoder.encode(timestamp + body) as BufferSource,
-    );
-  } catch (e) {
+  if (!signature || !timestamp) {
     return false;
   }
+
+  const publicKey = hexToBytes(publicKeyHex, 32);
+  const signatureBytes = hexToBytes(signature, 64);
+  if (!publicKey || !signatureBytes) {
+    return false;
+  }
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    publicKey,
+    { name: "Ed25519" },
+    false,
+    ["verify"],
+  );
+  return crypto.subtle.verify(
+    { name: "Ed25519" },
+    key,
+    signatureBytes,
+    new TextEncoder().encode(timestamp + body),
+  );
+}
+
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function interactionResponse(content: string): Response {
+  return jsonResponse({
+    type: 4,
+    data: {
+      content,
+      allowed_mentions: { parse: [] },
+    },
+  });
+}
+
+function getUsername(interaction: JsonRecord): string {
+  const member = interaction.member;
+  const memberUser = isRecord(member) ? member.user : undefined;
+  const user = isRecord(memberUser)
+    ? memberUser
+    : isRecord(interaction.user)
+      ? interaction.user
+      : undefined;
+
+  if (typeof user?.global_name === "string" && user.global_name.length > 0) {
+    return user.global_name;
+  }
+  if (typeof user?.username === "string" && user.username.length > 0) {
+    return user.username;
+  }
+  return "there";
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "GET") {
+      return jsonResponse({ status: "ok", service: "discord-bot" });
+    }
     if (request.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405 });
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: { Allow: "GET, POST" },
+      });
     }
 
     const body = await request.text();
-
-    // Step 1: Verify incoming Discord request signature
-    const isValid = await verifyDiscordRequest(
-      request,
-      body,
-      env.DISCORD_PUBLIC_KEY,
-    );
-    if (!isValid) {
-      return new Response("Invalid request signature", { status: 401 });
+    if (!env.DISCORD_PUBLIC_KEY) {
+      console.error("DISCORD_PUBLIC_KEY is not configured.");
+      return jsonResponse({ error: "Bot is not configured." }, 500);
     }
 
-    // Step 2: Handle Discord PING (Type 1)
-    const interaction = JSON.parse(body);
-    if (interaction.type === 1) {
-      return new Response(JSON.stringify({ type: 1 }), {
-        headers: { "Content-Type": "application/json" },
-      });
+    if (!(await verifyDiscordRequest(request, body, env.DISCORD_PUBLIC_KEY))) {
+      return jsonResponse({ error: "Invalid request signature." }, 401);
     }
 
+    let interaction: unknown;
     try {
-      const instance = await getWasmInstance();
-      const exports = instance.exports as any;
-
-      // Ensure export exists
-      if (typeof exports.handleRequest !== "function") {
-        throw new Error(
-          "Exported method 'handleRequest' not found on Wasm instance.",
-        );
+      interaction = JSON.parse(body);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        return jsonResponse({ error: "Invalid JSON body." }, 400);
       }
-
-      const commandName = interaction.data?.name;
-      const commandCode = { ping: 1, hello: 2, info: 3 }[commandName as
-        "ping" | "hello" | "info"] || 0;
-      const result = exports.handleRequest(commandCode);
-      const content = {
-        1: "🏓 Pong from Java TeaVM on Cloudflare Edge!",
-        2: "👋 Hello there from Cloudflare Workers!",
-        3: "🤖 **Bot Status:** Online | **Runtime:** Java 17 (TeaVM Wasm) on Cloudflare Edge",
-      }[result as 1 | 2 | 3] || `Unknown command: ${commandName || ""}`;
-      const responseJson = JSON.stringify({
-        type: 4,
-        data: { content },
-      });
-
-      return new Response(responseJson, {
-        headers: { "Content-Type": "application/json" },
-      });
-    } catch (err: any) {
-      console.error("Wasm Execution Error:", err);
-
-      return new Response(
-        JSON.stringify({
-          type: 4,
-          data: {
-            content: `⚠️ Error executing Java Worker: ${err?.message || err}`,
-          },
-        }),
-        { headers: { "Content-Type": "application/json" } },
-      );
+      throw error;
     }
+    if (!isRecord(interaction)) {
+      return jsonResponse({ error: "Invalid interaction payload." }, 400);
+    }
+
+    if (interaction.type === 1) {
+      return jsonResponse({ type: 1 });
+    }
+
+    if (interaction.type !== 2) {
+      return jsonResponse({ error: "Unsupported interaction type." }, 400);
+    }
+
+    const data = interaction.data;
+    if (!isRecord(data) || typeof data.name !== "string") {
+      return jsonResponse({ error: "Invalid application command." }, 400);
+    }
+
+    const command = commandsByName.get(data.name);
+    if (!command) {
+      return interactionResponse(`Unknown command: ${data.name}`);
+    }
+    const context: CommandContext = {
+      interaction,
+      username: getUsername(interaction),
+    };
+    return interactionResponse(command.execute(context));
   },
 };

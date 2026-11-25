@@ -1,8 +1,17 @@
 {
+  "name": "discordbot-worker",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "build:java": "set \"JAVA_HOME=C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.20.101-hotspot\" && set \"PATH=C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.20.101-hotspot\\bin;%PATH%\" && mvn clean package",
-    "deploy:worker": "npx wrangler deploy",
-    "register": "node register.js",
-    "deploy": "npm run build:java && npx wrangler deploy && node register.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "register": "node --env-file=.env --import=tsx scripts/register-commands.mjs",
+    "test": "tsx --test scripts/worker.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "tsx": "^4.20.6",
+    "wrangler": "^4.168.0"
   }
 }
