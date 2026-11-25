@@ -1,5 +1,6 @@
 import { isRecord } from "./helpers";
-import type { KeyValueStore } from "./types";
+import type { D1Database, KeyValueStore } from "./types";
+import { deleteScheduledItem, saveScheduledItem } from "../scheduler";
 
 export const STREAM_SETTINGS_PREFIX = "stream-settings:";
 export const MAX_STREAM_SOURCES = 10;
@@ -219,4 +220,44 @@ export async function readStreamSettings(
     throw new Error("Stored stream settings are invalid.");
   }
   return settings;
+}
+
+export async function saveStreamSettings(
+  store: KeyValueStore,
+  database: D1Database,
+  guildId: string,
+  settings: StreamSettings,
+): Promise<void> {
+  const key = streamSettingsKey(guildId);
+  const previous = await store.get(key);
+  await store.put(key, JSON.stringify(settings));
+  try {
+    if (settings.sources.length === 0) {
+      await deleteScheduledItem(database, "stream", guildId);
+      return;
+    }
+    await saveScheduledItem(database, "stream", {
+      itemKey: guildId,
+      dueAt: null,
+      lookupKey: null,
+      referenceKey: null,
+      payload: null,
+    });
+  } catch (error) {
+    try {
+      if (previous === null) {
+        await store.delete(key);
+      } else {
+        await store.put(key, previous);
+      }
+    } catch (rollbackError) {
+      console.error(
+        `Could not restore stream settings for server ${guildId}:`,
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : String(rollbackError),
+      );
+    }
+    throw error;
+  }
 }

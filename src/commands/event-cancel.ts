@@ -1,6 +1,11 @@
 import { getOption, isRecord } from "./helpers";
-import { eventDueKey, listGuildEvents } from "../events";
+import {
+  eventDueKey,
+  eventScheduleItemKey,
+  listGuildEvents,
+} from "../events";
 import { canManageServer } from "./permissions";
+import { deleteScheduledItem } from "../scheduler";
 import type { DiscordCommand } from "./types";
 
 function focusedValue(interaction: Record<string, unknown>): string {
@@ -34,7 +39,8 @@ const eventCancelCommand = {
     if (
       typeof guildId !== "string" ||
       !/^\d{17,20}$/.test(guildId) ||
-      !env.FEEDBACK_CONFIG
+      !env.FEEDBACK_CONFIG ||
+      !env.DB
     ) {
       return [];
     }
@@ -73,7 +79,7 @@ const eventCancelCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG || typeof eventId !== "string") {
+    if (!env.FEEDBACK_CONFIG || !env.DB || typeof eventId !== "string") {
       return {
         content: "Choose an upcoming event to cancel.",
         ephemeral: true,
@@ -92,6 +98,11 @@ const eventCancelCommand = {
       }
       await env.FEEDBACK_CONFIG.delete(key);
       try {
+        await deleteScheduledItem(
+          env.DB,
+          "event",
+          eventScheduleItemKey(scheduledEvent.event.guildId, eventId),
+        );
         await env.FEEDBACK_CONFIG.delete(
           eventDueKey(
             scheduledEvent.event.startsAt,

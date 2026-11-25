@@ -3,7 +3,7 @@ import { canManageServer } from "./permissions";
 import {
   parseStreamUrl,
   readStreamSettings,
-  streamSettingsKey,
+  saveStreamSettings,
 } from "./stream-settings";
 import type { CommandContext, CommandResponse } from "./types";
 
@@ -32,8 +32,8 @@ export async function setStreamSourcePaused(
       ephemeral: true,
     };
   }
-  if (!context.env.FEEDBACK_CONFIG) {
-    console.error("FEEDBACK_CONFIG KV binding is not configured.");
+  if (!context.env.FEEDBACK_CONFIG || !context.env.DB) {
+    console.error("Stream alerts are missing their KV or D1 binding.");
     return {
       content: "Stream alerts are unavailable on this server.",
       ephemeral: true,
@@ -74,9 +74,11 @@ export async function setStreamSourcePaused(
     }
     source.paused = paused;
     source.resumePending = !paused;
-    await context.env.FEEDBACK_CONFIG.put(
-      streamSettingsKey(guildId),
-      JSON.stringify(settings),
+    await saveStreamSettings(
+      context.env.FEEDBACK_CONFIG,
+      context.env.DB,
+      guildId,
+      settings,
     );
     return {
       content: paused

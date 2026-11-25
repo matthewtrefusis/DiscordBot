@@ -46,8 +46,8 @@ const remindCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.DB) {
+      console.error("DB D1 binding is not configured.");
       return {
         content: "Reminders are temporarily unavailable.",
         ephemeral: true,
@@ -56,7 +56,7 @@ const remindCommand = {
 
     const dueAt = Date.now() + minutes * 60_000;
     try {
-      await saveReminder(env.FEEDBACK_CONFIG, userId, message, dueAt);
+      await saveReminder(env.DB, userId, message, dueAt);
     } catch (error) {
       console.error(
         "Could not save reminder:",

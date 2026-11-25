@@ -1,9 +1,29 @@
 export interface CommandEnvironment {
   DISCORD_BOT_TOKEN?: string;
   FEEDBACK_CONFIG?: KeyValueStore;
+  DB?: D1Database;
   YOUTUBE_API_KEY?: string;
   TWITCH_CLIENT_ID?: string;
   TWITCH_CLIENT_SECRET?: string;
+}
+
+export interface D1Database {
+  prepare(query: string): {
+    bind(...values: (string | number | null)[]): D1PreparedStatement;
+  };
+}
+
+export interface D1PreparedStatement {
+  bind(...values: (string | number | null)[]): D1PreparedStatement;
+  all<T>(): Promise<{
+    results?: T[];
+    success?: boolean;
+    error?: string;
+  }>;
+  run(): Promise<{
+    success?: boolean;
+    error?: string;
+  }>;
 }
 
 export interface KeyValueStore {

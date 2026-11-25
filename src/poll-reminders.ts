@@ -1,6 +1,11 @@
 import { isRecord } from "./commands/helpers";
 import { pollKey, readPollState } from "./commands/poll";
-import type { CommandEnvironment, KeyValueStore } from "./commands/types";
+import type { CommandEnvironment } from "./commands/types";
+import {
+  deleteScheduledItem,
+  listDueScheduledItems,
+  saveScheduledItem,
+} from "./scheduler";
 
 const REMINDER_PREFIX = "poll-reminder:";
 const DUE_PREFIX = "poll-reminder-due:";
@@ -63,47 +68,6 @@ function parseReminder(value: string): PollReminder | null {
   };
 }
 
-async function dueReminderKeys(
-  store: KeyValueStore,
-  now: number,
-): Promise<{ key: string; dueAt: number; id: string }[]> {
-  const due: { key: string; dueAt: number; id: string }[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await store.list({
-      prefix: DUE_PREFIX,
-      limit: 1000,
-      ...(cursor ? { cursor } : {}),
-    });
-    let futureFound = false;
-    for (const { name } of [...page.keys].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
-    )) {
-      const match = /^poll-reminder-due:(\d{16}):([0-9a-f-]{36})$/
-        .exec(name);
-      if (!match) {
-        console.error(`Discarding malformed poll reminder index ${name}.`);
-        await store.delete(name);
-        continue;
-      }
-      const dueAt = Number(match[1]);
-      if (dueAt > now) {
-        futureFound = true;
-        break;
-      }
-      due.push({ key: name, dueAt, id: match[2] });
-    }
-    if (page.list_complete || futureFound) {
-      break;
-    }
-    if (!page.cursor) {
-      throw new Error("Cloudflare KV did not return a poll reminder cursor.");
-    }
-    cursor = page.cursor;
-  } while (true);
-  return due;
-}
-
 async function sendPollReminder(
   botToken: string,
   reminder: PollReminder,
@@ -137,28 +101,49 @@ export async function processDuePollReminders(
   now: number,
 ): Promise<void> {
   const store = env.FEEDBACK_CONFIG;
+  const database = env.DB;
   const botToken = env.DISCORD_BOT_TOKEN;
-  if (!store || !botToken) {
-    throw new Error("Poll reminders are missing their KV binding or bot token.");
+  if (!store || !database || !botToken) {
+    throw new Error("Poll reminders are missing their KV/D1 binding or bot token.");
   }
 
-  for (const dueItem of await dueReminderKeys(store, now)) {
-    const key = pollReminderKey(dueItem.id);
+  const dueItems = await listDueScheduledItems(
+    database,
+    "poll-reminder",
+    now,
+  );
+  for (const dueItem of dueItems) {
+    const id = dueItem.itemKey;
+    if (!/^[0-9a-f-]{36}$/.test(id) || dueItem.dueAt === null) {
+      console.error(`Discarding malformed poll reminder index ${id}.`);
+      await deleteScheduledItem(database, "poll-reminder", id);
+      if (dueItem.referenceKey) {
+        await store.delete(dueItem.referenceKey);
+      }
+      continue;
+    }
+    const key = pollReminderKey(id);
     try {
       const rawReminder = await store.get(key);
       if (!rawReminder) {
-        await store.delete(dueItem.key);
+        await deleteScheduledItem(database, "poll-reminder", id);
+        if (dueItem.referenceKey) {
+          await store.delete(dueItem.referenceKey);
+        }
         continue;
       }
       const reminder = parseReminder(rawReminder);
       if (
         !reminder ||
-        reminder.id !== dueItem.id ||
+        reminder.id !== id ||
         reminder.dueAt !== dueItem.dueAt
       ) {
         console.error(`Discarding malformed poll reminder ${key}.`);
         await store.delete(key);
-        await store.delete(dueItem.key);
+        await deleteScheduledItem(database, "poll-reminder", id);
+        if (dueItem.referenceKey) {
+          await store.delete(dueItem.referenceKey);
+        }
         continue;
       }
       const rawPoll = await store.get(pollKey(reminder.pollId));
@@ -169,7 +154,10 @@ export async function processDuePollReminders(
         poll.closed
       ) {
         await store.delete(key);
-        await store.delete(dueItem.key);
+        await deleteScheduledItem(database, "poll-reminder", id);
+        if (dueItem.referenceKey) {
+          await store.delete(dueItem.referenceKey);
+        }
         continue;
       }
       try {
@@ -179,7 +167,12 @@ export async function processDuePollReminders(
           poll.question,
           poll.messageId,
         );
-        for (const completedKey of [dueItem.key, key]) {
+        const completedKeys = [key];
+        if (dueItem.referenceKey) {
+          completedKeys.push(dueItem.referenceKey);
+        }
+        await deleteScheduledItem(database, "poll-reminder", id);
+        for (const completedKey of completedKeys) {
           try {
             await store.delete(completedKey);
           } catch (error) {
@@ -193,7 +186,10 @@ export async function processDuePollReminders(
         const attempts = reminder.attempts + 1;
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
           await store.delete(key);
-          await store.delete(dueItem.key);
+          await deleteScheduledItem(database, "poll-reminder", id);
+          if (dueItem.referenceKey) {
+            await store.delete(dueItem.referenceKey);
+          }
           console.error(
             `Discarding poll reminder ${key} after ${attempts} attempts:`,
             error instanceof Error ? error.message : String(error),

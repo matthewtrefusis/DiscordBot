@@ -3,7 +3,7 @@ import { canManageServer } from "./permissions";
 import {
   parseStreamUrl,
   readStreamSettings,
-  streamSettingsKey,
+  saveStreamSettings,
 } from "./stream-settings";
 import type { DiscordCommand } from "./types";
 
@@ -35,8 +35,8 @@ const streamRemoveCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.FEEDBACK_CONFIG || !env.DB) {
+      console.error("Stream alerts are missing their KV or D1 binding.");
       return {
         content: "Stream alerts are unavailable on this server.",
         ephemeral: true,
@@ -69,9 +69,11 @@ const streamRemoveCommand = {
         };
       }
       const [removed] = settings.sources.splice(index, 1);
-      await env.FEEDBACK_CONFIG.put(
-        streamSettingsKey(guildId),
-        JSON.stringify(settings),
+      await saveStreamSettings(
+        env.FEEDBACK_CONFIG,
+        env.DB,
+        guildId,
+        settings,
       );
       return {
         content: `Removed ${removed.displayName} from stream alerts.`,

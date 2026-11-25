@@ -7,5 +7,11 @@ compatibility_date = "2026-10-06"
 binding = "FEEDBACK_CONFIG"
 id = "7c60ce1312344b5c9a49e0cf4e06e6f3"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "discordbot-scheduler"
+database_id = "f168be31-c218-4b23-a82d-cda2e1f2c09e"
+migrations_dir = "migrations"
+
 [triggers]
 crons = ["* * * * *"]

@@ -34,6 +34,106 @@ function signedRequest(interaction) {
   });
 }
 
+function createMemoryDatabase() {
+  const rows = new Map();
+  return {
+    rows,
+    prepare(query) {
+      let parameters = [];
+      const statement = {
+        bind(...values) {
+          parameters = values;
+          return statement;
+        },
+        all: async () => {
+          const [itemType, secondParameter] = parameters;
+          let selected = [...rows.values()].filter(
+            (row) => row.itemType === itemType,
+          );
+          if (query.includes("due_at <= ?")) {
+            selected = selected.filter(
+              (row) => row.dueAt !== null && row.dueAt <= secondParameter,
+            );
+            selected.sort((left, right) =>
+              left.dueAt - right.dueAt ||
+              left.itemKey.localeCompare(right.itemKey)
+            );
+          } else if (query.includes("lookup_key = ?")) {
+            selected = selected.filter(
+              (row) => row.lookupKey === secondParameter,
+            );
+            selected.sort((left, right) =>
+              left.itemKey.localeCompare(right.itemKey)
+            );
+          } else {
+            selected.sort((left, right) =>
+              left.itemKey.localeCompare(right.itemKey)
+            );
+          }
+          return {
+            success: true,
+            results: selected.map((row) => ({ ...row })),
+          };
+        },
+        run: async () => {
+          if (query.includes("INSERT INTO scheduled_items")) {
+            const [
+              itemType,
+              itemKey,
+              dueAt,
+              lookupKey,
+              referenceKey,
+              payload,
+            ] = parameters;
+            rows.set(`${itemType}:${itemKey}`, {
+              itemType,
+              itemKey,
+              dueAt,
+              lookupKey,
+              referenceKey,
+              payload,
+            });
+          } else if (query.includes("DELETE FROM scheduled_items")) {
+            rows.delete(`${parameters[0]}:${parameters[1]}`);
+          } else if (query.includes("UPDATE scheduled_items")) {
+            const [payload, itemType, itemKey] = parameters;
+            const key = `${itemType}:${itemKey}`;
+            const row = rows.get(key);
+            if (row) rows.set(key, { ...row, payload });
+          } else {
+            throw new Error(`Unexpected D1 statement: ${query}`);
+          }
+          return { success: true };
+        },
+      };
+      return statement;
+    },
+  };
+}
+
+const databaseByStore = new WeakMap();
+
+function databaseForStore(store) {
+  if (!store || (typeof store !== "object" && typeof store !== "function")) {
+    return createMemoryDatabase();
+  }
+  let database = databaseByStore.get(store);
+  if (!database) {
+    database = createMemoryDatabase();
+    databaseByStore.set(store, database);
+  }
+  return database;
+}
+
+function withDatabase(env) {
+  return {
+    ...env,
+    ...(env.DB || !env.FEEDBACK_CONFIG
+      ? {}
+      : { DB: databaseForStore(env.FEEDBACK_CONFIG) }),
+  };
+}
+
 async function runCommand(
   name,
   options = [],
@@ -54,7 +154,7 @@ async function runCommand(
         },
       },
     }),
-    { DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides },
+    withDatabase({ DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides }),
     executionContext,
   );
   assert.equal(response.status, 200);
@@ -68,7 +168,7 @@ async function runAutocomplete(name, options, envOverrides = {}) {
       guild_id: "guild-id",
       data: { name, options },
     }),
-    { DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides },
+    withDatabase({ DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides }),
   );
   assert.equal(response.status, 200);
   return response.json();
@@ -76,19 +176,36 @@ async function runAutocomplete(name, options, envOverrides = {}) {
 
 function createMemoryStore(initialEntries = []) {
   const values = new Map(initialEntries);
+  const store = {
+    get: async (key) => values.get(key) ?? null,
+    put: async (key, value) => values.set(key, value),
+    delete: async (key) => values.delete(key),
+    list: async ({ prefix }) => ({
+      keys: [...values.keys()]
+        .filter((name) => name.startsWith(prefix))
+        .map((name) => ({ name })),
+      list_complete: true,
+    }),
+  };
+  const database = createMemoryDatabase();
+  for (const [key] of initialEntries) {
+    const streamMatch = /^stream-settings:(\d{17,20})$/.exec(key);
+    if (streamMatch) {
+      database.rows.set(`stream:${streamMatch[1]}`, {
+        itemType: "stream",
+        itemKey: streamMatch[1],
+        dueAt: null,
+        lookupKey: null,
+        referenceKey: null,
+        payload: null,
+      });
+    }
+  }
+  databaseByStore.set(store, database);
   return {
     values,
-    store: {
-      get: async (key) => values.get(key) ?? null,
-      put: async (key, value) => values.set(key, value),
-      delete: async (key) => values.delete(key),
-      list: async ({ prefix }) => ({
-        keys: [...values.keys()]
-          .filter((name) => name.startsWith(prefix))
-          .map((name) => ({ name })),
-        list_complete: true,
-      }),
-    },
+    store,
+    database,
   };
 }
 
@@ -114,7 +231,7 @@ async function runServerManagerCommand(
         user: { id: "123456789012345678", username: "tester" },
       },
     }),
-    { DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides },
+    withDatabase({ DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides }),
     executionContext,
   );
   assert.equal(response.status, 200);
@@ -166,9 +283,11 @@ test("runs the ping and info slash commands", async () => {
 
 test("runs the help, profile, timestamp, and fun commands", async () => {
   const help = await runCommand("help");
-  assert.match(help.data.content, /`\/8ball question`/);
-  assert.match(help.data.content, /`\/timeout user minutes \[reason\]`/);
-  assert.match(help.data.content, /`\/purge count \[reason\]`/);
+  assert.ok(help.data.content.length <= 2000);
+  assert.match(help.data.content, /`\/8ball`/);
+  assert.match(help.data.content, /`\/timeout`/);
+  assert.match(help.data.content, /`\/purge`/);
+  assert.match(help.data.content, /`\/suggestion-status`/);
 
   const userinfo = await runCommand("userinfo");
   assert.match(userinfo.data.content, /Test User/);
@@ -660,6 +779,7 @@ test("creates polls and lets a voter change their choice", async () => {
       list_complete: true,
     }),
   };
+  const database = databaseForStore(store);
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
     if (String(url).includes("/channels/")) {
@@ -801,17 +921,21 @@ test("schedules poll reminders and announces opted-in birthdays once", async () 
       guildId,
     );
     assert.match(scheduled.data.content, /I'll remind the channel/);
-    const dueKey = [...values.keys()].find((key) =>
-      key.startsWith("poll-reminder-due:")
+    const database = databaseForStore(store);
+    const reminder = [...database.rows.values()].find(
+      (row) => row.itemType === "poll-reminder",
     );
-    assert.ok(dueKey);
-    const dueAt = Number(dueKey.split(":")[1]);
+    assert.ok(reminder);
+    const dueAt = reminder.dueAt;
     await processDuePollReminders(
-      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      withDatabase({
+        FEEDBACK_CONFIG: store,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+      }),
       dueAt,
     );
     assert.match(JSON.parse(requests[0].options.body).content, /Which game/);
-    assert.equal(values.has(dueKey), false);
+    assert.equal(database.rows.has(`poll-reminder:${reminder.itemKey}`), false);
 
     const now = Date.now();
     const birthdaySetup = await runServerManagerCommand(
@@ -842,7 +966,10 @@ test("schedules poll reminders and announces opted-in birthdays once", async () 
     );
     assert.match(birthday.data.content, /opted in/);
     await processBirthdays(
-      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      withDatabase({
+        FEEDBACK_CONFIG: store,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+      }),
       now,
     );
     const birthdayRecord = [...values.entries()].find(([key]) =>
@@ -919,7 +1046,10 @@ test("runs a giveaway, accepts an entry, and selects the only entrant", async ()
     assert.match(joinPayload.data.content, /Entries: \*\*1\*\*/);
 
     await processDueGiveaways(
-      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      withDatabase({
+        FEEDBACK_CONFIG: store,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+      }),
       giveaway.endsAt,
     );
     const finalUpdate = requests.find(({ options }) => options.method === "PATCH");
@@ -1300,9 +1430,11 @@ test("sets a timezone and schedules reminders at local times", async () => {
     { FEEDBACK_CONFIG: store },
   );
   assert.match(response.data.content, /I'll DM you/);
-  const reminder = JSON.parse(
-    values.get([...values.keys()].find((key) => key.startsWith("reminder:"))),
+  const reminderRow = [...databaseForStore(store).rows.values()].find(
+    (row) => row.itemType === "reminder",
   );
+  assert.ok(reminderRow);
+  const reminder = JSON.parse(reminderRow.payload);
   assert.equal(reminder.message, "Join the call");
   assert.equal(reminder.userId, "123456789012345678");
   assert.equal(
@@ -1331,6 +1463,7 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
   const { values, store } = createMemoryStore([
     [`timezone:${userId}`, "Etc/UTC"],
   ]);
+  const database = databaseForStore(store);
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
     if (String(url).endsWith("/channels/234567890123456789/messages")) {
@@ -1370,7 +1503,7 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
         data: { custom_id: `event:${eventId}:join` },
         member: { user: { id: userId } },
       }),
-      { DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store },
+      withDatabase({ DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store }),
     );
     assert.equal((await rsvp.json()).type, 7);
     const attendees = await runServerManagerCommand(
@@ -1420,22 +1553,25 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
     );
 
     const event = JSON.parse(values.get(eventKey));
-    values.delete(eventDueKey(event.startsAt, guildId, eventId));
     values.set(eventKey, JSON.stringify({ ...event, startsAt: 0 }));
-    const dueEventIndex = eventDueKey(0, guildId, eventId);
-    values.set(dueEventIndex, "1");
+    const eventSchedule = database.rows.get(`event:${guildId}:${eventId}`);
+    assert.ok(eventSchedule);
+    database.rows.set(`event:${guildId}:${eventId}`, {
+      ...eventSchedule,
+      dueAt: 0,
+    });
     let scheduledTask;
     await worker.scheduled(
       { scheduledTime: Date.now() },
-      {
+      withDatabase({
         DISCORD_BOT_TOKEN: "test-bot-token",
         FEEDBACK_CONFIG: store,
-      },
+      }),
       { waitUntil: (task) => { scheduledTask = task; } },
     );
     await scheduledTask;
     assert.equal(values.has(eventKey), true);
-    assert.equal(values.has(dueEventIndex), false);
+    assert.equal(database.rows.has(`event:${guildId}:${eventId}`), false);
     assert.match(JSON.parse(requests[0].options.body).content, /Community meetup/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1521,17 +1657,22 @@ test("stores reminders and delivers due reminders by DM", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
   const values = new Map();
+  let listCalls = 0;
   const store = {
     get: async (key) => values.get(key) ?? null,
     put: async (key, value) => values.set(key, value),
     delete: async (key) => values.delete(key),
-    list: async ({ prefix }) => ({
-      keys: [...values.keys()]
-        .filter((name) => name.startsWith(prefix))
-        .map((name) => ({ name })),
-      list_complete: true,
-    }),
+    list: async ({ prefix }) => {
+      listCalls += 1;
+      return {
+        keys: [...values.keys()]
+          .filter((name) => name.startsWith(prefix))
+          .map((name) => ({ name })),
+        list_complete: true,
+      };
+    },
   };
+  const database = databaseForStore(store);
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
     if (String(url).endsWith("/users/@me/channels")) {
@@ -1551,35 +1692,45 @@ test("stores reminders and delivers due reminders by DM", async () => {
     );
     assert.equal(response.data.flags, 64);
     assert.match(response.data.content, /I'll DM you/);
-    const reminderKey = [...values.keys()].find((key) => key.startsWith("reminder:"));
-    assert.ok(reminderKey);
-
-    const savedReminder = JSON.parse(values.get(reminderKey));
+    const savedItem = [...database.rows.values()].find(
+      (row) => row.itemType === "reminder",
+    );
+    assert.ok(savedItem);
+    const savedReminder = JSON.parse(savedItem.payload);
     savedReminder.dueAt = 0;
-    values.set(reminderKey, JSON.stringify(savedReminder));
-    values.set(
-      "reminder:future",
-      JSON.stringify({
+    database.rows.set(`reminder:${savedItem.itemKey}`, {
+      ...savedItem,
+      dueAt: 0,
+      payload: JSON.stringify(savedReminder),
+    });
+    database.rows.set("reminder:future", {
+      itemType: "reminder",
+      itemKey: "future",
+      dueAt: Date.now() + 60_000,
+      lookupKey: null,
+      referenceKey: null,
+      payload: JSON.stringify({
         userId: "123456789012345678",
         message: "Later",
         dueAt: Date.now() + 60_000,
         attempts: 0,
       }),
-    );
+    });
 
     let scheduledTask;
     await worker.scheduled(
       { scheduledTime: Date.now() },
-      {
+      withDatabase({
         DISCORD_BOT_TOKEN: "test-bot-token",
         FEEDBACK_CONFIG: store,
-      },
+      }),
       { waitUntil: (task) => { scheduledTask = task; } },
     );
     await scheduledTask;
 
-    assert.equal(values.has(reminderKey), false);
-    assert.equal(values.has("reminder:future"), true);
+    assert.equal(listCalls, 0);
+    assert.equal(database.rows.has(`reminder:${savedItem.itemKey}`), false);
+    assert.equal(database.rows.has("reminder:future"), true);
     assert.equal(requests.length, 2);
     assert.deepEqual(
       JSON.parse(requests[0].options.body),
@@ -1820,11 +1971,11 @@ test("announces a new YouTube livestream and respects the polling interval", asy
     let scheduledTask;
     await worker.scheduled(
       { scheduledTime },
-      {
+      withDatabase({
         DISCORD_BOT_TOKEN: "test-bot-token",
         FEEDBACK_CONFIG: store,
         YOUTUBE_API_KEY: "test-youtube-key",
-      },
+      }),
       { waitUntil: (task) => { scheduledTask = task; } },
     );
     await scheduledTask;
@@ -1930,11 +2081,11 @@ test("announces new YouTube uploads but skips livestream recordings", async () =
     let scheduledTask;
     await worker.scheduled(
       { scheduledTime: now },
-      {
+      withDatabase({
         DISCORD_BOT_TOKEN: "test-bot-token",
         FEEDBACK_CONFIG: store,
         YOUTUBE_API_KEY: "test-youtube-key",
-      },
+      }),
       { waitUntil: (task) => { scheduledTask = task; } },
     );
     await scheduledTask;
@@ -2027,12 +2178,12 @@ test("announces Twitch VODs unless their live stream was already announced", asy
     let scheduledTask;
     await worker.scheduled(
       { scheduledTime: now },
-      {
+      withDatabase({
         DISCORD_BOT_TOKEN: "test-bot-token",
         FEEDBACK_CONFIG: store,
         TWITCH_CLIENT_ID: "test-client-id",
         TWITCH_CLIENT_SECRET: "test-client-secret",
-      },
+      }),
       { waitUntil: (task) => { scheduledTask = task; } },
     );
     await scheduledTask;

@@ -4,6 +4,7 @@ import {
   birthdayKey,
   parseBirthday,
 } from "../birthdays";
+import { deleteScheduledItem } from "../scheduler";
 import type { DiscordCommand } from "./types";
 
 const birthdayRemoveCommand = {
@@ -24,8 +25,8 @@ const birthdayRemoveCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.FEEDBACK_CONFIG || !env.DB) {
+      console.error("Birthday settings are missing their KV or D1 binding.");
       return {
         content: "Birthday settings are temporarily unavailable.",
         ephemeral: true,
@@ -39,6 +40,7 @@ const birthdayRemoveCommand = {
         throw new Error("Stored birthday has an invalid format.");
       }
       await env.FEEDBACK_CONFIG.delete(key);
+      await deleteScheduledItem(env.DB, "birthday", `${guildId}:${userId}`);
       if (birthday) {
         await env.FEEDBACK_CONFIG.delete(
           birthdayIndexKey(

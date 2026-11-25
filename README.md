@@ -84,9 +84,9 @@ Moderation responses are only visible to the moderator who ran the command. The 
 
 Feedback is posted by the bot without the submitter's username or ID, and the Worker does not store or log the feedback text. It stores category totals only for `/feedback-stats`. This is anonymous to people reading the feedback channel, not to Discord or Cloudflare; users should avoid including identifying details in their message. Reports are different: `/report` includes the submitter's username and ID and should be configured to a private moderator channel.
 
-Poll options, vote counts, and voter IDs are stored in Cloudflare KV so voters can change their choice. Reminder text, recipient IDs, and due times are also stored in KV until delivery. A once-per-minute Cron Trigger sends reminders by DM and retries failed deliveries up to five times; users must allow DMs from the bot.
+Poll options, vote counts, and voter IDs are stored in Cloudflare KV so voters can change their choice. Reminder text, recipient IDs, and due times are stored in D1. D1 also indexes due events, poll reminders, giveaways, birthdays, and servers configured for stream alerts, so the once-per-minute Cron Trigger can query scheduled work without scanning KV.
 
-Event RSVP lists, poll reminders, giveaway entries, suggestions and votes, FAQ entries, self-role allowlists, ticket metadata, report statuses, and moderation cases are stored in Cloudflare KV. Birthday announcements are opt-in and use only month/day; dates are interpreted in UTC, and the date remains stored until the member opts out. Moderation cases and report status records are retained for up to one year; ticket records are retained for 30 days. Suggestions are anonymous on the public board, but their text and votes are stored by the Worker. A once-per-minute Cron Trigger closes giveaways and sends birthday and poll reminders.
+Event details and RSVP lists, poll reminder details, giveaway entries, suggestions and votes, FAQ entries, self-role allowlists, ticket metadata, report statuses, and moderation cases remain in Cloudflare KV. Birthday announcements are opt-in and use only month/day; dates are interpreted in UTC, and the date remains stored until the member opts out. Moderation cases and report status records are retained for up to one year; ticket records are retained for 30 days. Suggestions are anonymous on the public board, but their text and votes are stored by the Worker. A once-per-minute Cron Trigger closes giveaways and sends birthday and poll reminders.
 
 Stream alerts check configured YouTube and Twitch channels every five minutes. They announce stream starts, new standard YouTube uploads, and Twitch archive VODs; a Twitch VOD is suppressed if the bot already announced its live stream. YouTube live streams and their recordings are not announced twice. Use `/stream-pause` and `/stream-resume` to control an individual source, and `/stream-test` to check the destination channel. YouTube checks use two read requests per channel per poll (1 quota unit each); with YouTube's default 10,000-unit daily allowance, keep the total monitored YouTube sources across servers modest. Each server can configure up to 10 sources. Stream state and Twitch's short-lived app access token are cached in KV to avoid duplicate announcements and unnecessary token requests.
 
@@ -155,15 +155,30 @@ Authenticate Wrangler and save the Discord public key as a Worker secret:
 ```sh
 npx wrangler login
 npx wrangler kv namespace create FEEDBACK_CONFIG
+npx wrangler d1 create discordbot-scheduler
 ```
 
-Replace `REPLACE_WITH_KV_NAMESPACE_ID` in `wrangler.toml` with the ID printed by Wrangler. Keep this namespace ID for future deploys so server settings persist. Then set the core Worker secrets and deploy:
+Replace the KV namespace ID and D1 `database_id` in `wrangler.toml` with the IDs printed by Wrangler. Keep these IDs for future deploys so existing settings and scheduled data persist. Apply the D1 schema before deploying:
+
+```sh
+npx wrangler d1 migrations apply discordbot-scheduler --remote
+```
+
+Set the core Worker secrets and deploy:
 
 ```sh
 npx wrangler secret put DISCORD_PUBLIC_KEY
 npx wrangler secret put DISCORD_BOT_TOKEN
 npm run deploy
 ```
+
+Immediately after deploying, import existing scheduled records from KV into D1:
+
+```sh
+npm run migrate:kv-scheduler
+```
+
+The import is safe to rerun and does not remove existing KV data. New scheduled records are written to D1 after deployment; legacy reminders, due indexes, birthday indexes, and stream-server indexes are imported by this command.
 
 If you plan to use livestream or video alerts, enable the YouTube Data API v3 in a Google Cloud project and create an API key, then create a Twitch application to get its client ID and client secret. Save these as additional Worker secrets before adding sources; do not paste them into Discord:
 
@@ -173,7 +188,7 @@ npx wrangler secret put TWITCH_CLIENT_ID
 npx wrangler secret put TWITCH_CLIENT_SECRET
 ```
 
-The Worker uses a once-per-minute Cron Trigger for reminders and scheduled events, and checks stream sources every five minutes.
+The Worker uses a once-per-minute Cron Trigger for reminders and scheduled events, and checks stream sources every five minutes. D1 is used for scheduled work indexes; KV remains the store for server configuration and most command records.
 
 After deployment, run `/setup-feedback` in each server to select its private feedback channel and categories, `/setup-reports` to choose a private moderator report channel, and `/setup-stream-alerts` to choose the stream and video announcement channel.
 Rerun `npm run register` after deploying to update the Discord slash-command definitions.

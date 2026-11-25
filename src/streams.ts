@@ -1,7 +1,6 @@
 import { isRecord } from "./commands/helpers";
 import {
   parseStreamSettings,
-  STREAM_SETTINGS_PREFIX,
   streamSettingsKey,
 } from "./commands/stream-settings";
 import type {
@@ -10,6 +9,7 @@ import type {
   StreamSource,
 } from "./commands/stream-settings";
 import type { CommandEnvironment, KeyValueStore } from "./commands/types";
+import { deleteScheduledItem, listScheduledItems } from "./scheduler";
 
 const STREAM_POLL_INTERVAL_MS = 5 * 60 * 1000;
 const TWITCH_TOKEN_PREFIX = "stream-twitch-token:";
@@ -542,27 +542,6 @@ async function sendLiveAnnouncement(
   }
 }
 
-async function listStreamSettingsKeys(store: KeyValueStore): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await store.list({
-      prefix: STREAM_SETTINGS_PREFIX,
-      limit: 1000,
-      ...(cursor ? { cursor } : {}),
-    });
-    keys.push(...page.keys.map((key) => key.name));
-    if (page.list_complete) {
-      break;
-    }
-    if (!page.cursor) {
-      throw new Error("Cloudflare KV did not return a cursor for more stream settings.");
-    }
-    cursor = page.cursor;
-  } while (true);
-  return keys;
-}
-
 async function storeStreamSettings(
   store: KeyValueStore,
   key: string,
@@ -576,15 +555,22 @@ export async function processLiveStreamAlerts(
   now: number,
 ): Promise<void> {
   const store = env.FEEDBACK_CONFIG;
-  if (!store) {
-    throw new Error("Stream alerts are missing the FEEDBACK_CONFIG KV binding.");
+  const database = env.DB;
+  if (!store || !database) {
+    throw new Error("Stream alerts are missing their KV or D1 binding.");
   }
 
   const alertedLiveStreams = new Set<string>();
-  const settingsKeys = await listStreamSettingsKeys(store);
-  for (const key of settingsKeys) {
+  const streamGuilds = await listScheduledItems(database, "stream");
+  for (const streamGuild of streamGuilds) {
+    const guildId = streamGuild.itemKey;
+    if (!/^\d{17,20}$/.test(guildId)) {
+      console.error(`Discarding malformed stream schedule ${guildId}.`);
+      await deleteScheduledItem(database, "stream", guildId);
+      continue;
+    }
+    const key = streamSettingsKey(guildId);
     try {
-      const guildId = key.slice(STREAM_SETTINGS_PREFIX.length);
       const rawSettings = await store.get(key);
       if (rawSettings === null) {
         continue;
@@ -602,6 +588,10 @@ export async function processLiveStreamAlerts(
       const settings = parseStreamSettings(parsed);
       if (!settings) {
         console.error(`Stream settings ${key} have an invalid format.`);
+        continue;
+      }
+      if (settings.sources.length === 0) {
+        await deleteScheduledItem(database, "stream", guildId);
         continue;
       }
 

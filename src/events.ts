@@ -1,5 +1,10 @@
 import { isRecord } from "./commands/helpers";
 import type { CommandEnvironment, KeyValueStore } from "./commands/types";
+import {
+  deleteScheduledItem,
+  listDueScheduledItems,
+  saveScheduledItem,
+} from "./scheduler";
 
 const EVENT_PREFIX = "event:";
 const EVENT_DUE_PREFIX = "event-due:";
@@ -29,6 +34,10 @@ export function eventDueKey(
   eventId: string,
 ): string {
   return `${EVENT_DUE_PREFIX}${String(Math.trunc(startsAt)).padStart(16, "0")}:${guildId}:${eventId}`;
+}
+
+export function eventScheduleItemKey(guildId: string, eventId: string): string {
+  return `${guildId}:${eventId}`;
 }
 
 export function parseScheduledEvent(value: string): ScheduledEvent | null {
@@ -112,46 +121,6 @@ export function renderEventAnnouncement(
   };
 }
 
-async function listDueEventKeys(
-  store: KeyValueStore,
-  now: number,
-): Promise<{ key: string; guildId: string; eventId: string }[]> {
-  const dueEvents: { key: string; guildId: string; eventId: string }[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await store.list({
-      prefix: EVENT_DUE_PREFIX,
-      limit: 1000,
-      ...(cursor ? { cursor } : {}),
-    });
-    let foundFutureEvent = false;
-    for (const { name } of [...page.keys].sort((left, right) =>
-      left.name < right.name ? -1 : left.name > right.name ? 1 : 0
-    )) {
-      const match = /^event-due:(\d{16}):(\d{17,20}):([0-9a-f-]{36})$/
-        .exec(name);
-      if (!match) {
-        console.error(`Discarding malformed event index ${name}.`);
-        await store.delete(name);
-        continue;
-      }
-      if (Number(match[1]) > now) {
-        foundFutureEvent = true;
-        break;
-      }
-      dueEvents.push({ key: name, guildId: match[2], eventId: match[3] });
-    }
-    if (page.list_complete || foundFutureEvent) {
-      break;
-    }
-    if (!page.cursor) {
-      throw new Error("Cloudflare KV did not return a cursor for more event indexes.");
-    }
-    cursor = page.cursor;
-  } while (true);
-  return dueEvents;
-}
-
 async function sendEventAnnouncement(
   botToken: string,
   scheduledEvent: ScheduledEvent,
@@ -216,47 +185,73 @@ export async function processDueEvents(
   now: number,
 ): Promise<void> {
   const store = env.FEEDBACK_CONFIG;
+  const database = env.DB;
   const botToken = env.DISCORD_BOT_TOKEN;
-  if (!store || !botToken) {
-    throw new Error("Scheduled events are missing their KV binding or bot token.");
+  if (!store || !database || !botToken) {
+    throw new Error("Scheduled events are missing their KV/D1 binding or bot token.");
   }
 
-  for (const dueEvent of await listDueEventKeys(store, now)) {
-    const key = eventKey(dueEvent.guildId, dueEvent.eventId);
+  const dueEvents = await listDueScheduledItems(database, "event", now);
+  for (const dueEvent of dueEvents) {
+    const match = /^(\d{17,20}):([0-9a-f-]{36})$/.exec(dueEvent.itemKey);
+    if (!match || dueEvent.dueAt === null) {
+      console.error(`Discarding malformed scheduled event index ${dueEvent.itemKey}.`);
+      await deleteScheduledItem(database, "event", dueEvent.itemKey);
+      continue;
+    }
+    const guildId = match[1];
+    const eventId = match[2];
+    const key = eventKey(guildId, eventId);
     try {
       const rawEvent = await store.get(key);
       if (!rawEvent) {
-        await store.delete(dueEvent.key);
+        await deleteScheduledItem(database, "event", dueEvent.itemKey);
+        if (dueEvent.referenceKey) {
+          await store.delete(dueEvent.referenceKey);
+        }
         continue;
       }
       const scheduledEvent = parseScheduledEvent(rawEvent);
       if (!scheduledEvent) {
         console.error(`Discarding malformed scheduled event ${key}.`);
         await store.delete(key);
-        await store.delete(dueEvent.key);
+        await deleteScheduledItem(database, "event", dueEvent.itemKey);
+        if (dueEvent.referenceKey) {
+          await store.delete(dueEvent.referenceKey);
+        }
         continue;
       }
       if (
-        scheduledEvent.guildId !== dueEvent.guildId ||
+        scheduledEvent.guildId !== guildId ||
         eventDueKey(
           scheduledEvent.startsAt,
           scheduledEvent.guildId,
-          dueEvent.eventId,
-        ) !== dueEvent.key
+          eventId,
+        ) !== (dueEvent.referenceKey ?? eventDueKey(
+          dueEvent.dueAt,
+          guildId,
+          eventId,
+        ))
       ) {
         console.error(`Scheduled event index does not match ${key}.`);
         await store.delete(key);
-        await store.delete(dueEvent.key);
+        await deleteScheduledItem(database, "event", dueEvent.itemKey);
+        if (dueEvent.referenceKey) {
+          await store.delete(dueEvent.referenceKey);
+        }
         continue;
       }
 
       try {
         await sendEventAnnouncement(botToken, scheduledEvent);
         try {
-          await store.delete(dueEvent.key);
+          await deleteScheduledItem(database, "event", dueEvent.itemKey);
+          if (dueEvent.referenceKey) {
+            await store.delete(dueEvent.referenceKey);
+          }
         } catch (error) {
           console.error(
-            `Could not remove completed event index ${dueEvent.key}:`,
+            `Could not remove completed event index ${dueEvent.itemKey}:`,
             error instanceof Error ? error.message : String(error),
           );
         }
@@ -265,7 +260,10 @@ export async function processDueEvents(
         const attempts = scheduledEvent.attempts + 1;
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
           await store.delete(key);
-          await store.delete(dueEvent.key);
+          await deleteScheduledItem(database, "event", dueEvent.itemKey);
+          if (dueEvent.referenceKey) {
+            await store.delete(dueEvent.referenceKey);
+          }
           console.error(
             `Discarding event ${key} after ${attempts} delivery attempts:`,
             error instanceof Error ? error.message : String(error),

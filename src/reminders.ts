@@ -1,7 +1,12 @@
 import { isRecord } from "./commands/helpers";
-import type { CommandEnvironment, KeyValueStore } from "./commands/types";
+import type { CommandEnvironment, D1Database } from "./commands/types";
+import {
+  deleteScheduledItem,
+  listDueScheduledItems,
+  saveScheduledItem,
+  updateScheduledPayload,
+} from "./scheduler";
 
-const REMINDER_PREFIX = "reminder:";
 const MAX_DELIVERY_ATTEMPTS = 5;
 export const MAX_REMINDER_DELAY_MS = 356 * 24 * 60 * 60 * 1000;
 
@@ -13,16 +18,19 @@ interface Reminder {
 }
 
 export async function saveReminder(
-  store: KeyValueStore,
+  database: D1Database,
   userId: string,
   message: string,
   dueAt: number,
 ): Promise<string> {
   const reminderId = crypto.randomUUID();
-  await store.put(
-    `${REMINDER_PREFIX}${reminderId}`,
-    JSON.stringify({ userId, message, dueAt, attempts: 0 }),
-  );
+  await saveScheduledItem(database, "reminder", {
+    itemKey: reminderId,
+    dueAt,
+    lookupKey: null,
+    referenceKey: null,
+    payload: JSON.stringify({ userId, message, dueAt, attempts: 0 }),
+  });
   return reminderId;
 }
 
@@ -57,29 +65,6 @@ function parseReminder(value: string): Reminder | null {
     dueAt: parsed.dueAt,
     attempts: parsed.attempts,
   };
-}
-
-async function listReminderKeys(
-  store: KeyValueStore,
-): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await store.list({
-      prefix: REMINDER_PREFIX,
-      limit: 1000,
-      ...(cursor ? { cursor } : {}),
-    });
-    keys.push(...page.keys.map((key) => key.name));
-    if (page.list_complete) {
-      break;
-    }
-    if (!page.cursor) {
-      throw new Error("Cloudflare KV did not return a cursor for more reminders.");
-    }
-    cursor = page.cursor;
-  } while (true);
-  return keys;
 }
 
 async function deliverReminder(
@@ -121,31 +106,40 @@ async function deliverReminder(
   }
 }
 
-async function deleteReminder(store: KeyValueStore, key: string): Promise<void> {
-  await store.delete(key);
-}
-
 export async function processDueReminders(
   env: CommandEnvironment,
   now: number,
 ): Promise<void> {
+  const database = env.DB;
   const store = env.FEEDBACK_CONFIG;
   const botToken = env.DISCORD_BOT_TOKEN;
-  if (!store || !botToken) {
-    throw new Error("Reminder delivery is missing its KV binding or bot token.");
+  if (!database || !botToken) {
+    throw new Error("Reminder delivery is missing its D1 binding or bot token.");
   }
 
-  const reminderKeys = await listReminderKeys(store);
-  for (const key of reminderKeys) {
+  const reminders = await listDueScheduledItems(database, "reminder", now);
+  for (const { itemKey, payload, referenceKey } of reminders) {
     try {
-      const rawReminder = await store.get(key);
-      if (!rawReminder) {
+      if (!payload) {
+        await deleteScheduledItem(database, "reminder", itemKey);
+        if (referenceKey) {
+          if (!store) {
+            throw new Error("Legacy reminder cleanup is missing the KV binding.");
+          }
+          await store.delete(referenceKey);
+        }
         continue;
       }
-      const reminder = parseReminder(rawReminder);
+      const reminder = parseReminder(payload);
       if (!reminder) {
-        console.error(`Discarding malformed reminder ${key}.`);
-        await deleteReminder(store, key);
+        console.error(`Discarding malformed reminder ${itemKey}.`);
+        await deleteScheduledItem(database, "reminder", itemKey);
+        if (referenceKey) {
+          if (!store) {
+            throw new Error("Legacy reminder cleanup is missing the KV binding.");
+          }
+          await store.delete(referenceKey);
+        }
         continue;
       }
       if (reminder.dueAt > now) {
@@ -154,27 +148,44 @@ export async function processDueReminders(
 
       try {
         await deliverReminder(botToken, reminder);
-        await deleteReminder(store, key);
+        await deleteScheduledItem(database, "reminder", itemKey);
+        if (referenceKey) {
+          if (!store) {
+            throw new Error("Legacy reminder cleanup is missing the KV binding.");
+          }
+          await store.delete(referenceKey);
+        }
       } catch (error) {
         const attempts = reminder.attempts + 1;
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
-          await deleteReminder(store, key);
+          await deleteScheduledItem(database, "reminder", itemKey);
+          if (referenceKey) {
+            if (!store) {
+              throw new Error("Legacy reminder cleanup is missing the KV binding.");
+            }
+            await store.delete(referenceKey);
+          }
           console.error(
-            `Discarding reminder ${key} after ${attempts} delivery attempts:`,
+            `Discarding reminder ${itemKey} after ${attempts} delivery attempts:`,
             error instanceof Error ? error.message : String(error),
           );
           continue;
         }
 
-        await store.put(key, JSON.stringify({ ...reminder, attempts }));
+        await updateScheduledPayload(
+          database,
+          "reminder",
+          itemKey,
+          JSON.stringify({ ...reminder, attempts }),
+        );
         console.error(
-          `Reminder ${key} delivery attempt ${attempts} failed:`,
+          `Reminder ${itemKey} delivery attempt ${attempts} failed:`,
           error instanceof Error ? error.message : String(error),
         );
       }
     } catch (error) {
       console.error(
-        `Could not process reminder ${key}:`,
+        `Could not process reminder ${itemKey}:`,
         error instanceof Error ? error.message : String(error),
       );
     }

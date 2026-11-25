@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "migrate:kv-scheduler": "node scripts/migrate-kv-scheduler.mjs",
     "register": "node --env-file=.env --import=tsx scripts/register-commands.mjs",
     "test": "tsx --test scripts/worker.test.mjs",
     "typecheck": "tsc --noEmit"

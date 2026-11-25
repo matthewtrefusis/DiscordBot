@@ -1,5 +1,10 @@
 import { isRecord } from "./commands/helpers";
 import type { CommandEnvironment, KeyValueStore } from "./commands/types";
+import {
+  deleteScheduledItem,
+  listDueScheduledItems,
+  saveScheduledItem,
+} from "./scheduler";
 
 const GIVEAWAY_PREFIX = "giveaway:";
 const DUE_PREFIX = "giveaway-due:";
@@ -114,46 +119,6 @@ export function renderGiveaway(giveaway: Giveaway): {
   };
 }
 
-async function dueGiveawayIndexes(
-  store: KeyValueStore,
-  now: number,
-): Promise<{ key: string; endsAt: number; id: string }[]> {
-  const due: { key: string; endsAt: number; id: string }[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await store.list({
-      prefix: DUE_PREFIX,
-      limit: 1000,
-      ...(cursor ? { cursor } : {}),
-    });
-    let futureFound = false;
-    for (const { name } of [...page.keys].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
-    )) {
-      const match = /^giveaway-due:(\d{16}):([0-9a-f-]{36})$/.exec(name);
-      if (!match) {
-        console.error(`Discarding malformed giveaway index ${name}.`);
-        await store.delete(name);
-        continue;
-      }
-      const endsAt = Number(match[1]);
-      if (endsAt > now) {
-        futureFound = true;
-        break;
-      }
-      due.push({ key: name, endsAt, id: match[2] });
-    }
-    if (page.list_complete || futureFound) {
-      break;
-    }
-    if (!page.cursor) {
-      throw new Error("Cloudflare KV did not return a giveaway cursor.");
-    }
-    cursor = page.cursor;
-  } while (true);
-  return due;
-}
-
 async function finishGiveaway(
   store: KeyValueStore,
   botToken: string,
@@ -220,27 +185,44 @@ export async function processDueGiveaways(
   now: number,
 ): Promise<void> {
   const store = env.FEEDBACK_CONFIG;
+  const database = env.DB;
   const botToken = env.DISCORD_BOT_TOKEN;
-  if (!store || !botToken) {
-    throw new Error("Giveaways are missing their KV binding or bot token.");
+  if (!store || !database || !botToken) {
+    throw new Error("Giveaways are missing their KV/D1 binding or bot token.");
   }
-  for (const dueItem of await dueGiveawayIndexes(store, now)) {
-    const key = giveawayKey(dueItem.id);
+  const dueItems = await listDueScheduledItems(database, "giveaway", now);
+  for (const dueItem of dueItems) {
+    const id = dueItem.itemKey;
+    if (!/^[0-9a-f-]{36}$/.test(id) || dueItem.dueAt === null) {
+      console.error(`Discarding malformed giveaway index ${id}.`);
+      await deleteScheduledItem(database, "giveaway", id);
+      if (dueItem.referenceKey) {
+        await store.delete(dueItem.referenceKey);
+      }
+      continue;
+    }
+    const key = giveawayKey(id);
     try {
       const rawGiveaway = await store.get(key);
       if (!rawGiveaway) {
-        await store.delete(dueItem.key);
+        await deleteScheduledItem(database, "giveaway", id);
+        if (dueItem.referenceKey) {
+          await store.delete(dueItem.referenceKey);
+        }
         continue;
       }
       const giveaway = parseGiveaway(rawGiveaway);
       if (
         !giveaway ||
-        giveaway.id !== dueItem.id ||
-        giveaway.endsAt !== dueItem.endsAt
+        giveaway.id !== id ||
+        giveaway.endsAt !== dueItem.dueAt
       ) {
         console.error(`Discarding malformed giveaway ${key}.`);
         await store.delete(key);
-        await store.delete(dueItem.key);
+        await deleteScheduledItem(database, "giveaway", id);
+        if (dueItem.referenceKey) {
+          await store.delete(dueItem.referenceKey);
+        }
         continue;
       }
       let closingGiveaway = giveaway;
@@ -253,7 +235,12 @@ export async function processDueGiveaways(
           });
         }
         await finishGiveaway(store, botToken, closingGiveaway);
-        for (const completedKey of [dueItem.key, key]) {
+        await deleteScheduledItem(database, "giveaway", id);
+        const completedKeys = [key];
+        if (dueItem.referenceKey) {
+          completedKeys.push(dueItem.referenceKey);
+        }
+        for (const completedKey of completedKeys) {
           try {
             await store.delete(completedKey);
           } catch (error) {
@@ -267,7 +254,10 @@ export async function processDueGiveaways(
         const attempts = closingGiveaway.attempts + 1;
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
           await store.delete(key);
-          await store.delete(dueItem.key);
+          await deleteScheduledItem(database, "giveaway", id);
+          if (dueItem.referenceKey) {
+            await store.delete(dueItem.referenceKey);
+          }
           console.error(
             `Discarding giveaway ${key} after ${attempts} delivery attempts:`,
             error instanceof Error ? error.message : String(error),

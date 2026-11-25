@@ -3,9 +3,9 @@ import { canManageServer } from "./permissions";
 import { listPolls } from "./poll";
 import {
   POLL_REMINDER_TTL_SECONDS,
-  pollReminderDueKey,
   pollReminderKey,
 } from "../poll-reminders";
+import { deleteScheduledItem, saveScheduledItem } from "../scheduler";
 import type { DiscordCommand } from "./types";
 
 const MAX_REMINDER_MINUTES = 356 * 24 * 60;
@@ -49,7 +49,8 @@ const pollRemindCommand = {
     if (
       typeof guildId !== "string" ||
       !/^\d{17,20}$/.test(guildId) ||
-      !env.FEEDBACK_CONFIG
+      !env.FEEDBACK_CONFIG ||
+      !env.DB
     ) {
       return [];
     }
@@ -102,8 +103,9 @@ const pollRemindCommand = {
       };
     }
     const store = env.FEEDBACK_CONFIG;
-    if (!store) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    const database = env.DB;
+    if (!store || !database) {
+      console.error("Poll reminders are missing their KV or D1 binding.");
       return {
         content: "Poll reminders are temporarily unavailable.",
         ephemeral: true,
@@ -132,14 +134,25 @@ const pollRemindCommand = {
         await store.put(pollReminderKey(id), JSON.stringify(reminder), {
           expirationTtl: POLL_REMINDER_TTL_SECONDS,
         });
-        await store.put(pollReminderDueKey(dueAt, id), "1", {
-          expirationTtl: POLL_REMINDER_TTL_SECONDS,
+        await saveScheduledItem(database, "poll-reminder", {
+          itemKey: id,
+          dueAt,
+          lookupKey: null,
+          referenceKey: null,
+          payload: null,
         });
       } catch (error) {
-        for (const key of [
-          pollReminderKey(id),
-          pollReminderDueKey(dueAt, id),
-        ]) {
+        try {
+          await deleteScheduledItem(database, "poll-reminder", id);
+        } catch (deleteError) {
+          console.error(
+            `Could not remove incomplete poll reminder schedule ${id}:`,
+            deleteError instanceof Error
+              ? deleteError.message
+              : String(deleteError),
+          );
+        }
+        for (const key of [pollReminderKey(id)]) {
           try {
             await store.delete(key);
           } catch (deleteError) {

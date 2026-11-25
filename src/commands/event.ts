@@ -1,13 +1,14 @@
 import { getOption, getUser, isRecord } from "./helpers";
 import {
-  eventDueKey,
   eventKey,
+  eventScheduleItemKey,
   parseScheduledEvent,
   renderEventAnnouncement,
   type ScheduledEvent,
 } from "../events";
 import { canManageServer } from "./permissions";
 import { parseLocalDateTime, readUserTimeZone } from "../time-utils";
+import { deleteScheduledItem, saveScheduledItem } from "../scheduler";
 import type {
   CommandContext,
   DiscordCommand,
@@ -61,7 +62,8 @@ async function updateEventRsvp(
     !/^\d{17,20}$/.test(userId) ||
     typeof guildId !== "string" ||
     !/^\d{17,20}$/.test(guildId) ||
-    !env.FEEDBACK_CONFIG
+    !env.FEEDBACK_CONFIG ||
+    !env.DB
   ) {
     return {
       type: 4,
@@ -197,8 +199,8 @@ const eventCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.FEEDBACK_CONFIG || !env.DB) {
+      console.error("Event scheduling is missing its KV or D1 binding.");
       return {
         content: "Event scheduling is temporarily unavailable.",
         ephemeral: true,
@@ -273,16 +275,31 @@ const eventCommand = {
         JSON.stringify(scheduledEvent),
         { expirationTtl: EVENT_TTL_SECONDS },
       );
-      await env.FEEDBACK_CONFIG.put(
-        eventDueKey(result.timestamp, guildId, eventId),
-        "1",
-        { expirationTtl: EVENT_TTL_SECONDS },
-      );
+      await saveScheduledItem(env.DB, "event", {
+        itemKey: eventScheduleItemKey(guildId, eventId),
+        dueAt: result.timestamp,
+        lookupKey: null,
+        referenceKey: null,
+        payload: null,
+      });
     } catch (error) {
-      for (const incompleteKey of [
-        eventKey(guildId, eventId),
-        eventDueKey(result.timestamp, guildId, eventId),
-      ]) {
+      try {
+        if (env.DB) {
+          await deleteScheduledItem(
+            env.DB,
+            "event",
+            eventScheduleItemKey(guildId, eventId),
+          );
+        }
+      } catch (deleteError) {
+        console.error(
+          "Could not remove incomplete event schedule:",
+          deleteError instanceof Error
+            ? deleteError.message
+            : String(deleteError),
+        );
+      }
+      for (const incompleteKey of [eventKey(guildId, eventId)]) {
         try {
           await env.FEEDBACK_CONFIG.delete(incompleteKey);
         } catch (deleteError) {

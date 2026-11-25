@@ -2,7 +2,7 @@ import { getOption, isRecord } from "./helpers";
 import { canManageServer } from "./permissions";
 import {
   readStreamSettings,
-  streamSettingsKey,
+  saveStreamSettings,
 } from "./stream-settings";
 import type { DiscordCommand } from "./types";
 
@@ -33,8 +33,8 @@ const setupStreamAlertsCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.FEEDBACK_CONFIG || !env.DB) {
+      console.error("Stream alerts are missing their KV or D1 binding.");
       return {
         content: "Stream alert setup is unavailable on this server.",
         ephemeral: true,
@@ -63,12 +63,14 @@ const setupStreamAlertsCommand = {
 
     try {
       const settings = await readStreamSettings(env.FEEDBACK_CONFIG, guildId);
-      await env.FEEDBACK_CONFIG.put(
-        streamSettingsKey(guildId),
-        JSON.stringify({
+      await saveStreamSettings(
+        env.FEEDBACK_CONFIG,
+        env.DB,
+        guildId,
+        {
           channelId,
           sources: settings?.sources ?? [],
-        }),
+        },
       );
     } catch (error) {
       console.error(

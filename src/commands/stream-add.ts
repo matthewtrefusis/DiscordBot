@@ -5,7 +5,7 @@ import {
   MAX_STREAM_SOURCES,
   parseStreamUrl,
   readStreamSettings,
-  streamSettingsKey,
+  saveStreamSettings,
 } from "./stream-settings";
 import type { DiscordCommand } from "./types";
 
@@ -38,8 +38,8 @@ const streamAddCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.FEEDBACK_CONFIG || !env.DB) {
+      console.error("Stream alerts are missing their KV or D1 binding.");
       return {
         content: "Stream alerts are unavailable on this server.",
         ephemeral: true,
@@ -94,6 +94,7 @@ const streamAddCommand = {
     }
 
     const store = env.FEEDBACK_CONFIG;
+    const database = env.DB;
     const addedAt = Date.now();
     const backgroundTask = resolveStreamSource(env, parsedUrl)
       .then(async (source) => {
@@ -112,7 +113,7 @@ const streamAddCommand = {
           return `This server has reached the limit of ${MAX_STREAM_SOURCES} stream sources.`;
         }
         settings.sources.push({ ...source, addedAt });
-        await store.put(streamSettingsKey(guildId), JSON.stringify(settings));
+        await saveStreamSettings(store, database, guildId, settings);
         return `Added ${source.displayName} (${source.platform}) to stream alerts.`;
       })
       .catch((error: unknown) => {

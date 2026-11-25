@@ -4,6 +4,7 @@ import {
   birthdayKey,
   parseBirthday,
 } from "../birthdays";
+import { saveScheduledItem } from "../scheduler";
 import type { DiscordCommand } from "./types";
 
 function isValidBirthday(month: number, day: number): boolean {
@@ -61,8 +62,8 @@ const birthdaySetCommand = {
         ephemeral: true,
       };
     }
-    if (!env.FEEDBACK_CONFIG) {
-      console.error("FEEDBACK_CONFIG KV binding is not configured.");
+    if (!env.FEEDBACK_CONFIG || !env.DB) {
+      console.error("Birthday settings are missing their KV or D1 binding.");
       return {
         content: "Birthday settings are temporarily unavailable.",
         ephemeral: true,
@@ -70,9 +71,10 @@ const birthdaySetCommand = {
     }
 
     const key = birthdayKey(guildId, userId);
-    const indexKey = birthdayIndexKey(month, day, guildId, userId);
+    let previousRaw: string | null = null;
+    let saved = false;
     try {
-      const previousRaw = await env.FEEDBACK_CONFIG.get(key);
+      previousRaw = await env.FEEDBACK_CONFIG.get(key);
       let previous: ReturnType<typeof parseBirthday> = null;
       if (previousRaw) {
         previous = parseBirthday(previousRaw);
@@ -91,17 +93,51 @@ const birthdaySetCommand = {
           : {}),
       };
       await env.FEEDBACK_CONFIG.put(key, JSON.stringify(birthday));
-      await env.FEEDBACK_CONFIG.put(indexKey, "1");
+      saved = true;
+      await saveScheduledItem(env.DB, "birthday", {
+        itemKey: `${guildId}:${userId}`,
+        dueAt: null,
+        lookupKey: `${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+        referenceKey: null,
+        payload: null,
+      });
       if (previous && (previous.month !== month || previous.day !== day)) {
-        await env.FEEDBACK_CONFIG.delete(
-          birthdayIndexKey(previous.month, previous.day, guildId, userId),
+        const oldIndexKey = birthdayIndexKey(
+          previous.month,
+          previous.day,
+          guildId,
+          userId,
         );
+        try {
+          await env.FEEDBACK_CONFIG.delete(oldIndexKey);
+        } catch (error) {
+          console.error(
+            `Could not remove legacy birthday index ${oldIndexKey}:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
     } catch (error) {
       console.error(
         "Could not save birthday:",
         error instanceof Error ? error.message : String(error),
       );
+      if (saved) {
+        try {
+          if (previousRaw === null) {
+            await env.FEEDBACK_CONFIG.delete(key);
+          } else {
+            await env.FEEDBACK_CONFIG.put(key, previousRaw);
+          }
+        } catch (rollbackError) {
+          console.error(
+            "Could not restore the previous birthday record:",
+            rollbackError instanceof Error
+              ? rollbackError.message
+              : String(rollbackError),
+          );
+        }
+      }
       return {
         content: "Your birthday could not be saved. Please try again later.",
         ephemeral: true,

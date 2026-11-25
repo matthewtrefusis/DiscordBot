@@ -2,11 +2,11 @@ import { getOption, isRecord } from "./helpers";
 import { canManageServer } from "./permissions";
 import {
   type Giveaway,
-  giveawayDueKey,
   giveawayKey,
   parseGiveaway,
   renderGiveaway,
 } from "../giveaways";
+import { deleteScheduledItem, saveScheduledItem } from "../scheduler";
 import type { CommandContext, DiscordCommand, InteractionCallback } from "./types";
 
 const MAX_GIVEAWAY_MINUTES = 356 * 24 * 60;
@@ -204,8 +204,9 @@ const giveawayCommand = {
       };
     }
     const store = env.FEEDBACK_CONFIG;
-    if (!store || !env.DISCORD_BOT_TOKEN) {
-      console.error("Giveaways are missing their KV binding or bot token.");
+    const database = env.DB;
+    if (!store || !database || !env.DISCORD_BOT_TOKEN) {
+      console.error("Giveaways are missing their KV/D1 binding or bot token.");
       return {
         content: "Giveaways are temporarily unavailable.",
         ephemeral: true,
@@ -226,16 +227,25 @@ const giveawayCommand = {
         JSON.stringify(giveaway),
         { expirationTtl: GIVEAWAY_TTL_SECONDS },
       );
-      await store.put(
-        giveawayDueKey(giveaway.endsAt, giveaway.id),
-        "1",
-        { expirationTtl: GIVEAWAY_TTL_SECONDS },
-      );
+      await saveScheduledItem(database, "giveaway", {
+        itemKey: giveaway.id,
+        dueAt: giveaway.endsAt,
+        lookupKey: null,
+        referenceKey: null,
+        payload: null,
+      });
     } catch (error) {
-      for (const key of [
-        giveawayKey(giveaway.id),
-        giveawayDueKey(giveaway.endsAt, giveaway.id),
-      ]) {
+      try {
+        await deleteScheduledItem(database, "giveaway", giveaway.id);
+      } catch (deleteError) {
+        console.error(
+          `Could not remove incomplete giveaway schedule ${giveaway.id}:`,
+          deleteError instanceof Error
+            ? deleteError.message
+            : String(deleteError),
+        );
+      }
+      for (const key of [giveawayKey(giveaway.id)]) {
         try {
           await store.delete(key);
         } catch (deleteError) {
@@ -263,22 +273,29 @@ const giveawayCommand = {
         context,
         giveaway,
       ).catch((error: unknown) => {
-        const cleanup = [
-          giveawayKey(giveaway.id),
-          giveawayDueKey(giveaway.endsAt, giveaway.id),
-        ];
-        return Promise.all(cleanup.map(async (key) => {
+        const cleanup = (async () => {
           try {
-            await store.delete(key);
+            await deleteScheduledItem(database, "giveaway", giveaway.id);
           } catch (deleteError) {
             console.error(
-              `Could not remove failed giveaway state ${key}:`,
+              `Could not remove failed giveaway schedule ${giveaway.id}:`,
               deleteError instanceof Error
                 ? deleteError.message
                 : String(deleteError),
             );
           }
-        })).then(() => {
+          try {
+            await store.delete(giveawayKey(giveaway.id));
+          } catch (deleteError) {
+            console.error(
+              `Could not remove failed giveaway state ${giveawayKey(giveaway.id)}:`,
+              deleteError instanceof Error
+                ? deleteError.message
+                : String(deleteError),
+            );
+          }
+        })();
+        return cleanup.then(() => {
           console.error(
             "Could not post giveaway:",
             error instanceof Error ? error.message : String(error),

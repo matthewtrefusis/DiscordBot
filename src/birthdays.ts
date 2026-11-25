@@ -1,5 +1,10 @@
 import { isRecord } from "./commands/helpers";
-import type { CommandEnvironment, KeyValueStore } from "./commands/types";
+import type { CommandEnvironment } from "./commands/types";
+import {
+  deleteScheduledItem,
+  listScheduledItemsByLookup,
+  saveScheduledItem,
+} from "./scheduler";
 
 const INDEX_PREFIX = "birthday-date:";
 
@@ -76,31 +81,6 @@ export function parseBirthday(value: string): Birthday | null {
   };
 }
 
-async function birthdayIndexKeys(
-  store: KeyValueStore,
-  month: number,
-  day: number,
-): Promise<string[]> {
-  const keys: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await store.list({
-      prefix: `${INDEX_PREFIX}${twoDigits(month)}-${twoDigits(day)}:`,
-      limit: 1000,
-      ...(cursor ? { cursor } : {}),
-    });
-    keys.push(...page.keys.map((key) => key.name));
-    if (page.list_complete) {
-      break;
-    }
-    if (!page.cursor) {
-      throw new Error("Cloudflare KV did not return a birthday cursor.");
-    }
-    cursor = page.cursor;
-  } while (true);
-  return keys;
-}
-
 async function announceBirthday(
   botToken: string,
   channelId: string,
@@ -130,26 +110,35 @@ export async function processBirthdays(
   now: number,
 ): Promise<void> {
   const store = env.FEEDBACK_CONFIG;
+  const database = env.DB;
   const botToken = env.DISCORD_BOT_TOKEN;
-  if (!store || !botToken) {
-    throw new Error("Birthday announcements are missing their KV binding or bot token.");
+  if (!store || !database || !botToken) {
+    throw new Error("Birthday announcements are missing their KV/D1 binding or bot token.");
   }
 
   const date = new Date(now);
   const month = date.getUTCMonth() + 1;
   const day = date.getUTCDate();
   const year = date.getUTCFullYear();
-  for (const indexKey of await birthdayIndexKeys(store, month, day)) {
-    const suffix = indexKey.slice(`${INDEX_PREFIX}${twoDigits(month)}-${twoDigits(day)}:`.length);
-    const [guildId, userId] = suffix.split(":");
+  const lookupKey = `${twoDigits(month)}-${twoDigits(day)}`;
+  const birthdays = await listScheduledItemsByLookup(
+    database,
+    "birthday",
+    lookupKey,
+  );
+  for (const scheduledBirthday of birthdays) {
+    const [guildId, userId] = scheduledBirthday.itemKey.split(":");
     if (
       typeof guildId !== "string" ||
       !/^\d{17,20}$/.test(guildId) ||
       typeof userId !== "string" ||
       !/^\d{17,20}$/.test(userId)
     ) {
-      console.error(`Discarding malformed birthday index ${indexKey}.`);
-      await store.delete(indexKey);
+      console.error(`Discarding malformed birthday index ${scheduledBirthday.itemKey}.`);
+      await deleteScheduledItem(database, "birthday", scheduledBirthday.itemKey);
+      if (scheduledBirthday.referenceKey) {
+        await store.delete(scheduledBirthday.referenceKey);
+      }
       continue;
     }
 
@@ -158,7 +147,10 @@ export async function processBirthdays(
       const birthday = rawBirthday ? parseBirthday(rawBirthday) : null;
       if (!birthday) {
         console.error(`Discarding invalid birthday record for ${guildId}/${userId}.`);
-        await store.delete(indexKey);
+        await deleteScheduledItem(database, "birthday", scheduledBirthday.itemKey);
+        if (scheduledBirthday.referenceKey) {
+          await store.delete(scheduledBirthday.referenceKey);
+        }
         continue;
       }
       if (
