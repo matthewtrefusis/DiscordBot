@@ -606,6 +606,9 @@ export async function processLiveStreamAlerts(
       }
 
       for (const source of settings.sources) {
+        if (source.paused) {
+          continue;
+        }
         if (
           typeof source.lastCheckedAt === "number" &&
           now - source.lastCheckedAt < STREAM_POLL_INTERVAL_MS
@@ -617,9 +620,20 @@ export async function processLiveStreamAlerts(
         try {
           const activity = await getCurrentActivity(env, store, source);
           const liveStream = activity.liveStream;
+          if (source.resumePending) {
+            source.activeStreamId = liveStream?.id ?? null;
+            source.activeStreamAlerted = false;
+            source.resumePending = false;
+            for (const video of activity.videos) {
+              recordObservedVideo(source, video);
+            }
+            await storeStreamSettings(store, key, settings);
+            continue;
+          }
           if (
             source.platform === "twitch" &&
             source.activeStreamId &&
+            (source.activeStreamAlerted ?? true) &&
             (!liveStream || liveStream.id !== source.activeStreamId)
           ) {
             await markTwitchLiveAlerted(
@@ -632,6 +646,7 @@ export async function processLiveStreamAlerts(
           }
           if (!liveStream) {
             source.activeStreamId = null;
+            source.activeStreamAlerted = false;
           } else {
             if (source.activeStreamId !== liveStream.id) {
               if (!env.DISCORD_BOT_TOKEN) {
@@ -644,8 +659,14 @@ export async function processLiveStreamAlerts(
                 liveStream,
               );
               source.activeStreamId = liveStream.id;
+              source.activeStreamAlerted = true;
+            } else if (source.activeStreamAlerted === undefined) {
+              source.activeStreamAlerted = true;
             }
-            if (source.platform === "twitch") {
+            if (
+              source.platform === "twitch" &&
+              source.activeStreamAlerted
+            ) {
               await markTwitchLiveAlerted(
                 store,
                 guildId,

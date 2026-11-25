@@ -38,7 +38,7 @@ const streamListCommand = {
       }
       const sources = settings.sources.length
         ? settings.sources
-          .map((source) => `• ${source.displayName.slice(0, 50)} (${source.platform}): ${source.url}`)
+          .map((source) => `• ${source.displayName.slice(0, 50)} (${source.platform})${source.paused ? " — paused" : ""}: ${source.url}`)
           .join("\n")
         : "No channels added yet.";
       return {

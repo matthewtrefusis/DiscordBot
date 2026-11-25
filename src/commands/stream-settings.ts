@@ -12,6 +12,9 @@ export interface StreamSource {
   uploadsPlaylistId?: string;
   channelLogin?: string;
   activeStreamId?: string | null;
+  activeStreamAlerted?: boolean;
+  paused?: boolean;
+  resumePending?: boolean;
   addedAt?: number;
   lastObservedVideoId?: string | null;
   lastObservedVideoAt?: number;
@@ -137,6 +140,11 @@ function isStreamSource(value: unknown): value is StreamSource {
     (value.activeStreamId !== undefined &&
       value.activeStreamId !== null &&
       typeof value.activeStreamId !== "string") ||
+    (value.activeStreamAlerted !== undefined &&
+      typeof value.activeStreamAlerted !== "boolean") ||
+    (value.paused !== undefined && typeof value.paused !== "boolean") ||
+    (value.resumePending !== undefined &&
+      typeof value.resumePending !== "boolean") ||
     (value.addedAt !== undefined &&
       (typeof value.addedAt !== "number" || !Number.isFinite(value.addedAt))) ||
     (value.lastObservedVideoId !== undefined &&

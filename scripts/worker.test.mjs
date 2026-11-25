@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 import worker from "../src/index.ts";
+import { eventDueKey } from "../src/events.ts";
+import { parseLocalDateTime } from "../src/time-utils.ts";
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const publicKeyHex = publicKey
@@ -93,11 +95,14 @@ async function runServerManagerCommand(
   envOverrides,
   executionContext,
   additionalData = {},
+  guildId = "guild-id",
+  channelId = "234567890123456789",
 ) {
   const response = await worker.fetch(
     signedRequest({
       type: 2,
-      guild_id: "guild-id",
+      guild_id: guildId,
+      channel_id: channelId,
       application_id: "345678901234567890",
       token: "test-interaction-token",
       data: { name, options, ...additionalData },
@@ -430,6 +435,7 @@ test("delivers feedback without including the submitter's identity", async () =>
   const originalFetch = globalThis.fetch;
   const requests = [];
   const backgroundTasks = [];
+  const savedValues = new Map();
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
     return new Response(null, { status: 200 });
@@ -465,13 +471,15 @@ test("delivers feedback without including the submitter's identity", async () =>
         DISCORD_BOT_TOKEN: "test-bot-token",
         FEEDBACK_CONFIG: {
           get: async (key) => {
-            assert.equal(key, "feedback-settings:guild-id");
-            return JSON.stringify({
-              channelId: "987654321098765432",
-              categories: ["Bug", "Suggestion", "Other"],
-            });
+            if (key === "feedback-settings:guild-id") {
+              return JSON.stringify({
+                channelId: "987654321098765432",
+                categories: ["Bug", "Suggestion", "Other"],
+              });
+            }
+            return savedValues.get(key) ?? null;
           },
-          put: async () => {},
+          put: async (key, value) => savedValues.set(key, value),
         },
       },
       { waitUntil: (task) => backgroundTasks.push(task) },
@@ -490,6 +498,106 @@ test("delivers feedback without including the submitter's identity", async () =>
     const followup = JSON.parse(requests[1].options.body);
     assert.match(followup.content, /submitted anonymously/);
     assert.equal(followup.flags, 64);
+    assert.deepEqual(
+      JSON.parse(savedValues.get("feedback-stats:guild-id")),
+      { Suggestion: 1 },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("shows feedback category totals only to server managers", async () => {
+  const { store } = createMemoryStore([
+    ["feedback-settings:guild-id", JSON.stringify({
+      channelId: "987654321098765432",
+      categories: ["Bug", "Suggestion"],
+    })],
+    ["feedback-stats:guild-id", JSON.stringify({ Bug: 3, Suggestion: 8 })],
+  ]);
+  const response = await runServerManagerCommand(
+    "feedback-stats",
+    [],
+    { FEEDBACK_CONFIG: store },
+  );
+  assert.equal(response.data.flags, 64);
+  assert.match(response.data.content, /Bug: \*\*3\*\*/);
+  assert.match(response.data.content, /Suggestion: \*\*8\*\*/);
+});
+
+test("configures a private report channel and sends identified reports to it", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  const guildId = "123456789012345678";
+  const { values, store } = createMemoryStore();
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const setup = await runServerManagerCommand(
+      "setup-reports",
+      [{ name: "channel", value: "987654321098765432" }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {
+        resolved: {
+          channels: {
+            "987654321098765432": { type: 0, guild_id: guildId },
+          },
+        },
+      },
+      guildId,
+    );
+    assert.match(setup.data.content, /private to moderators/);
+    assert.equal(
+      values.get(`report-settings:${guildId}`),
+      "987654321098765432",
+    );
+
+    const response = await worker.fetch(
+      signedRequest({
+        type: 2,
+        guild_id: guildId,
+        application_id: "application-id",
+        token: "interaction-token",
+        data: {
+          name: "report",
+          options: [
+            { name: "message", value: "A user is spamming." },
+            {
+              name: "message_link",
+              value: `https://discord.com/channels/${guildId}/123456789012345678/234567890123456789`,
+            },
+          ],
+        },
+        member: {
+          user: {
+            id: "123456789012345678",
+            username: "test-user",
+            global_name: "Test User",
+          },
+        },
+      }),
+      {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+      },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+    );
+    assert.deepEqual(await response.json(), { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    const posted = JSON.parse(requests[0].options.body);
+    assert.match(posted.content, /Report from Test User/);
+    assert.match(posted.content, /123456789012345678/);
+    assert.match(posted.content, /A user is spamming/);
+    assert.ok(
+      posted.content.includes(`https://discord.com/channels/${guildId}/`),
+    );
+    assert.deepEqual(posted.allowed_mentions, { parse: [] });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -574,6 +682,256 @@ test("creates polls and lets a voter change their choice", async () => {
     assert.match(changedVote.data.content, /1\. Red — 0 vote/);
     assert.match(changedVote.data.content, /2\. Blue — 1 vote/);
     assert.equal(requests.length, 2);
+
+    const pollId = customIds[0].split(":")[1];
+    const results = await runServerManagerCommand(
+      "poll-results",
+      [{ name: "poll", value: pollId }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      "123456789012345678",
+    );
+    assert.match(results.data.content, /Current results/);
+    assert.match(results.data.content, /Total votes: \*\*1\*\*/);
+
+    const closed = await runServerManagerCommand(
+      "poll-close",
+      [{ name: "poll", value: pollId }],
+      {
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+      },
+      undefined,
+      {},
+      "123456789012345678",
+    );
+    assert.match(closed.data.content, /Closed/);
+    const pollState = JSON.parse(values.get(`poll:${pollId}`));
+    assert.equal(pollState.closed, true);
+    const edit = requests.find((request) => request.options.method === "PATCH");
+    assert.ok(edit);
+    assert.equal(
+      JSON.parse(edit.options.body).components[0].components[0].disabled,
+      true,
+    );
+    const closedVote = await vote(customIds[0]);
+    assert.equal(closedVote.type, 4);
+    assert.match(closedVote.data.content, /poll is closed/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sets a timezone and schedules reminders at local times", async () => {
+  const { values, store } = createMemoryStore();
+  const timezone = await runCommand(
+    "timezone",
+    [{ name: "timezone", value: "Etc/UTC" }],
+    { FEEDBACK_CONFIG: store },
+  );
+  assert.match(timezone.data.content, /Etc\/UTC/);
+
+  const localTime = new Date(Date.now() + 20 * 60_000)
+    .toISOString()
+    .slice(0, 16)
+    .replace("T", " ");
+  const response = await runCommand(
+    "remind-at",
+    [
+      { name: "local_time", value: localTime },
+      { name: "message", value: "Join the call" },
+    ],
+    { FEEDBACK_CONFIG: store },
+  );
+  assert.match(response.data.content, /I'll DM you/);
+  const reminder = JSON.parse(
+    values.get([...values.keys()].find((key) => key.startsWith("reminder:"))),
+  );
+  assert.equal(reminder.message, "Join the call");
+  assert.equal(reminder.userId, "123456789012345678");
+  assert.equal(
+    Math.floor(reminder.dueAt / 60_000),
+    Math.floor(new Date(`${localTime}:00Z`).getTime() / 60_000),
+  );
+});
+
+test("rejects daylight-saving gaps and ambiguous local reminder times", () => {
+  assert.equal(
+    parseLocalDateTime("2026-03-08 02:30", "America/New_York").status,
+    "invalid",
+  );
+  assert.equal(
+    parseLocalDateTime("2026-11-01 01:30", "America/New_York").status,
+    "ambiguous",
+  );
+});
+
+test("schedules and delivers events and lists or cancels upcoming ones", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const guildId = "123456789012345678";
+  const userId = "123456789012345678";
+  const { values, store } = createMemoryStore([
+    [`timezone:${userId}`, "Etc/UTC"],
+  ]);
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const localTime = new Date(Date.now() + 30 * 60_000)
+      .toISOString()
+      .slice(0, 16)
+      .replace("T", " ");
+    const scheduled = await runServerManagerCommand(
+      "event",
+      [
+        { name: "title", value: "Community meetup" },
+        { name: "local_time", value: localTime },
+      ],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(scheduled.data.content, /Community meetup/);
+    const eventKey = [...values.keys()].find((key) =>
+      key.startsWith(`event:${guildId}:`)
+    );
+    assert.ok(eventKey);
+
+    const listed = await runServerManagerCommand(
+      "events",
+      [],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(listed.data.content, /Community meetup/);
+
+    const cancelId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const cancelStartsAt = Date.now() + 60 * 60_000;
+    values.set(`event:${guildId}:${cancelId}`, JSON.stringify({
+      guildId,
+      channelId: "234567890123456789",
+      title: "Cancel this meetup",
+      startsAt: cancelStartsAt,
+      createdBy: userId,
+      attempts: 0,
+    }));
+    values.set(eventDueKey(cancelStartsAt, guildId, cancelId), "1");
+    const cancelled = await runServerManagerCommand(
+      "event-cancel",
+      [{ name: "event", value: cancelId }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(cancelled.data.content, /Cancelled/);
+    assert.equal(values.has(`event:${guildId}:${cancelId}`), false);
+    assert.equal(
+      values.has(eventDueKey(cancelStartsAt, guildId, cancelId)),
+      false,
+    );
+
+    const event = JSON.parse(values.get(eventKey));
+    const eventId = eventKey.slice(eventKey.lastIndexOf(":") + 1);
+    values.delete(eventDueKey(event.startsAt, guildId, eventId));
+    values.set(eventKey, JSON.stringify({ ...event, startsAt: 0 }));
+    const dueEventIndex = eventDueKey(0, guildId, eventId);
+    values.set(dueEventIndex, "1");
+    let scheduledTask;
+    await worker.scheduled(
+      { scheduledTime: Date.now() },
+      {
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+      },
+      { waitUntil: (task) => { scheduledTask = task; } },
+    );
+    await scheduledTask;
+    assert.equal(values.has(eventKey), false);
+    assert.equal(values.has(dueEventIndex), false);
+    assert.match(JSON.parse(requests[0].options.body).content, /Community meetup/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("pauses and resumes stream sources and can send a test alert", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const guildId = "123456789012345678";
+  const source = {
+    platform: "twitch",
+    url: "https://www.twitch.tv/samplechannel",
+    channelId: "987654321",
+    displayName: "SampleChannel",
+    channelLogin: "samplechannel",
+  };
+  const { values, store } = createMemoryStore([
+    [
+      `stream-settings:${guildId}`,
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [source],
+      }),
+    ],
+  ]);
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const paused = await runServerManagerCommand(
+      "stream-pause",
+      [{ name: "channel_url", value: source.url }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(paused.data.content, /Paused/);
+    assert.equal(
+      JSON.parse(values.get(`stream-settings:${guildId}`)).sources[0].paused,
+      true,
+    );
+
+    const resumed = await runServerManagerCommand(
+      "stream-resume",
+      [{ name: "channel_url", value: source.url }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(resumed.data.content, /Resumed/);
+    const resumedSource = JSON.parse(
+      values.get(`stream-settings:${guildId}`),
+    ).sources[0];
+    assert.equal(resumedSource.paused, false);
+    assert.equal(resumedSource.resumePending, true);
+
+    const backgroundTasks = [];
+    const tested = await runServerManagerCommand(
+      "stream-test",
+      [],
+      {
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+      },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+      {},
+      guildId,
+    );
+    assert.deepEqual(tested, { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    assert.match(JSON.parse(requests[0].options.body).content, /Stream alert test/);
   } finally {
     globalThis.fetch = originalFetch;
   }

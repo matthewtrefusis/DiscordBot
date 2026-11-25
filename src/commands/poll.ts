@@ -11,9 +11,13 @@ interface PollState {
   question: string;
   options: string[];
   votes: Record<string, number>;
+  closed?: boolean;
+  messageId?: string;
 }
 
-function pollKey(pollId: string): string {
+const POLL_TTL_SECONDS = 365 * 24 * 60 * 60;
+
+export function pollKey(pollId: string): string {
   return `poll:${pollId}`;
 }
 
@@ -33,14 +37,14 @@ function parseOptions(value: unknown): string[] | null {
   return options;
 }
 
-function countsFor(poll: PollState): number[] {
+export function countsFor(poll: PollState): number[] {
   return poll.options.map(
     (_, index) =>
       Object.values(poll.votes).filter((vote) => vote === index).length,
   );
 }
 
-function renderPoll(pollId: string, poll: PollState): {
+export function renderPoll(pollId: string, poll: PollState): {
   content: string;
   components: Record<string, unknown>[];
 } {
@@ -51,7 +55,9 @@ function renderPoll(pollId: string, poll: PollState): {
       ...poll.options.map(
         (option, index) => `${index + 1}. ${option} — ${counts[index]} vote(s)`,
       ),
-      "_Click an option to vote. You can change your vote at any time._",
+      poll.closed
+        ? "_This poll is closed._"
+        : "_Click an option to vote. You can change your vote at any time._",
     ].join("\n"),
     components: [
       {
@@ -61,6 +67,7 @@ function renderPoll(pollId: string, poll: PollState): {
           style: 1,
           label: option,
           custom_id: `poll:${pollId}:${index}`,
+          ...(poll.closed ? { disabled: true } : {}),
         })),
       },
     ],
@@ -88,9 +95,15 @@ async function publishPoll(
     question,
     options,
     votes: {},
+    closed: false,
   };
+  let messagePosted = false;
   try {
-    await store.put(pollKey(pollId), JSON.stringify(poll));
+    await store.put(
+      pollKey(pollId),
+      JSON.stringify(poll),
+      { expirationTtl: POLL_TTL_SECONDS },
+    );
   } catch (error) {
     console.error(
       "Could not save poll state:",
@@ -118,25 +131,45 @@ async function publishPoll(
     if (!response.ok) {
       throw new Error(`Discord returned HTTP ${response.status}.`);
     }
+    messagePosted = true;
+    const postedMessage: unknown = await response.json();
+    if (
+      !isRecord(postedMessage) ||
+      typeof postedMessage.id !== "string" ||
+      !/^\d{17,20}$/.test(postedMessage.id)
+    ) {
+      throw new Error("Discord returned an invalid poll message.");
+    }
+    poll.messageId = postedMessage.id;
+    await store.put(
+      pollKey(pollId),
+      JSON.stringify(poll),
+      { expirationTtl: POLL_TTL_SECONDS },
+    );
     return "Your poll has been posted.";
   } catch (error) {
     console.error(
       "Could not post poll:",
       error instanceof Error ? error.message : String(error),
     );
-    try {
-      await store.delete(pollKey(pollId));
-    } catch (deleteError) {
-      console.error(
-        "Could not remove failed poll state:",
-        deleteError instanceof Error ? deleteError.message : String(deleteError),
-      );
+    if (!messagePosted) {
+      try {
+        await store.delete(pollKey(pollId));
+      } catch (deleteError) {
+        console.error(
+          "Could not remove failed poll state:",
+          deleteError instanceof Error ? deleteError.message : String(deleteError),
+        );
+      }
+    }
+    if (messagePosted) {
+      return "The poll was posted, but its message details could not be saved. Voting will continue, but the message may not update when closed.";
     }
     return "The poll could not be posted. Check that the bot can send messages in this channel.";
   }
 }
 
-function readPollState(value: string): PollState | null {
+export function readPollState(value: string): PollState | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -169,7 +202,11 @@ function readPollState(value: string): PollState | null {
         typeof option === "string" ? option.toLowerCase() : "",
       ),
     ).size !== parsed.options.length ||
-    !isRecord(parsed.votes)
+    !isRecord(parsed.votes) ||
+    (parsed.closed !== undefined && typeof parsed.closed !== "boolean") ||
+    (parsed.messageId !== undefined &&
+      (typeof parsed.messageId !== "string" ||
+        !/^\d{17,20}$/.test(parsed.messageId)))
   ) {
     return null;
   }
@@ -192,7 +229,45 @@ function readPollState(value: string): PollState | null {
     question: parsed.question,
     options: parsed.options,
     votes,
+    ...(parsed.closed === true ? { closed: true } : {}),
+    ...(typeof parsed.messageId === "string"
+      ? { messageId: parsed.messageId }
+      : {}),
   };
+}
+
+export async function listPolls(
+  store: NonNullable<CommandContext["env"]["FEEDBACK_CONFIG"]>,
+  guildId: string,
+): Promise<{ id: string; poll: PollState }[]> {
+  const polls: { id: string; poll: PollState }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await store.list({
+      prefix: "poll:",
+      limit: 1000,
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const entry of page.keys) {
+      const id = entry.name.slice("poll:".length);
+      const rawPoll = await store.get(entry.name);
+      const poll = rawPoll ? readPollState(rawPoll) : null;
+      if (poll?.guildId === guildId) {
+        polls.push({ id, poll });
+      } else if (rawPoll && !poll) {
+        console.error(`Discarding malformed poll ${entry.name}.`);
+        await store.delete(entry.name);
+      }
+    }
+    if (page.list_complete) {
+      break;
+    }
+    if (!page.cursor) {
+      throw new Error("Cloudflare KV did not return a cursor for more polls.");
+    }
+    cursor = page.cursor;
+  } while (true);
+  return polls;
 }
 
 function componentError(content: string): InteractionCallback {
@@ -236,6 +311,9 @@ async function voteOnPoll({
     ) {
       return componentError("This poll is unavailable in this channel.");
     }
+    if (poll.closed) {
+      return componentError("This poll is closed.");
+    }
 
     const optionIndex = Number(match[2]);
     if (optionIndex >= poll.options.length) {
@@ -245,6 +323,7 @@ async function voteOnPoll({
     await env.FEEDBACK_CONFIG.put(
       pollKey(match[1]),
       JSON.stringify(poll),
+      { expirationTtl: POLL_TTL_SECONDS },
     );
     return {
       type: 7,

@@ -7,6 +7,7 @@ import type {
   WorkerExecutionContext,
 } from "./commands/types";
 import { processDueReminders } from "./reminders";
+import { processDueEvents } from "./events";
 import { processLiveStreamAlerts } from "./streams";
 
 export interface Env extends CommandEnvironment {
@@ -289,6 +290,16 @@ export default {
         error instanceof Error ? error.message : String(error),
       );
     });
-    executionContext.waitUntil(Promise.all([reminderTask, streamTask]));
+    const eventTask = processDueEvents(env, controller.scheduledTime).catch(
+      (error: unknown) => {
+        console.error(
+          "Scheduled event processing failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      },
+    );
+    executionContext.waitUntil(
+      Promise.all([reminderTask, streamTask, eventTask]),
+    );
   },
 };

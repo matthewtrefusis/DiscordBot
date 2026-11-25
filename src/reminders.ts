@@ -3,12 +3,27 @@ import type { CommandEnvironment, KeyValueStore } from "./commands/types";
 
 const REMINDER_PREFIX = "reminder:";
 const MAX_DELIVERY_ATTEMPTS = 5;
+export const MAX_REMINDER_DELAY_MS = 356 * 24 * 60 * 60 * 1000;
 
 interface Reminder {
   userId: string;
   message: string;
   dueAt: number;
   attempts: number;
+}
+
+export async function saveReminder(
+  store: KeyValueStore,
+  userId: string,
+  message: string,
+  dueAt: number,
+): Promise<string> {
+  const reminderId = crypto.randomUUID();
+  await store.put(
+    `${REMINDER_PREFIX}${reminderId}`,
+    JSON.stringify({ userId, message, dueAt, attempts: 0 }),
+  );
+  return reminderId;
 }
 
 function parseReminder(value: string): Reminder | null {

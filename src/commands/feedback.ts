@@ -3,13 +3,15 @@ import {
   readFeedbackSettings,
   type FeedbackSettings,
 } from "./feedback-settings";
-import type { DiscordCommand } from "./types";
+import type { CommandContext, DiscordCommand } from "./types";
 
 async function deliverFeedback(
   message: string,
   category: string,
   botToken: string,
   channelId: string,
+  guildId: string,
+  store: NonNullable<CommandContext["env"]["FEEDBACK_CONFIG"]>,
 ): Promise<string> {
   try {
     const response = await fetch(
@@ -30,6 +32,52 @@ async function deliverFeedback(
     if (!response.ok) {
       console.error(`Feedback delivery failed with HTTP ${response.status}.`);
       return "Your feedback couldn't be delivered. Please try again later.";
+    }
+
+    try {
+      const statsKey = `feedback-stats:${guildId}`;
+      const rawStats = await store.get(statsKey);
+      const counts = new Map<string, number>();
+      if (rawStats !== null) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawStats);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            throw new Error("Stored feedback statistics are invalid JSON.");
+          }
+          throw error;
+        }
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          Array.isArray(parsed)
+        ) {
+          throw new Error("Stored feedback statistics have an invalid format.");
+        }
+        for (const [name, count] of Object.entries(parsed)) {
+          if (
+            typeof count !== "number" ||
+            !Number.isSafeInteger(count) ||
+            count < 0
+          ) {
+            throw new Error("Stored feedback statistics have an invalid count.");
+          }
+          counts.set(name, count);
+        }
+      }
+      const nextCount = (counts.get(category) ?? 0) + 1;
+      if (!Number.isSafeInteger(nextCount)) {
+        throw new Error("Feedback category total exceeds the supported range.");
+      }
+      counts.set(category, nextCount);
+      await store.put(statsKey, JSON.stringify(Object.fromEntries(counts)));
+    } catch (error) {
+      console.error(
+        "Feedback was delivered but category statistics could not be updated:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return "Your feedback was submitted anonymously, but its category total could not be updated.";
     }
 
     return "Thank you for your feedback. It was submitted anonymously.";
@@ -175,6 +223,8 @@ const feedbackCommand = {
         configuredCategory,
         botToken,
         settings.channelId,
+        guildId,
+        env.FEEDBACK_CONFIG,
       ),
     };
   },

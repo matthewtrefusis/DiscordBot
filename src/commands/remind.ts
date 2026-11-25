@@ -1,7 +1,6 @@
 import { getOption, isRecord } from "./helpers";
+import { MAX_REMINDER_DELAY_MS, saveReminder } from "../reminders";
 import type { DiscordCommand } from "./types";
-
-const MAX_REMINDER_MINUTES = 356 * 24 * 60;
 
 const remindCommand = {
   name: "remind",
@@ -13,7 +12,7 @@ const remindCommand = {
       description: "How many minutes from now (1-512640).",
       required: true,
       min_value: 1,
-      max_value: MAX_REMINDER_MINUTES,
+      max_value: MAX_REMINDER_DELAY_MS / 60_000,
     },
     {
       type: 3,
@@ -38,7 +37,7 @@ const remindCommand = {
       typeof minutes !== "number" ||
       !Number.isInteger(minutes) ||
       minutes < 1 ||
-      minutes > MAX_REMINDER_MINUTES ||
+      minutes > MAX_REMINDER_DELAY_MS / 60_000 ||
       message.length === 0 ||
       message.length > 1000
     ) {
@@ -56,12 +55,8 @@ const remindCommand = {
     }
 
     const dueAt = Date.now() + minutes * 60_000;
-    const reminderId = crypto.randomUUID();
     try {
-      await env.FEEDBACK_CONFIG.put(
-        `reminder:${reminderId}`,
-        JSON.stringify({ userId, message, dueAt, attempts: 0 }),
-      );
+      await saveReminder(env.FEEDBACK_CONFIG, userId, message, dueAt);
     } catch (error) {
       console.error(
         "Could not save reminder:",
