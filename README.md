@@ -5,7 +5,7 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 ## Features
 
 - Ed25519 verification of every Discord interaction.
-- Slash commands for help, user profiles, timestamps, fun utilities, and anonymous feedback.
+- Slash commands for help, user profiles, timestamps, fun utilities, anonymous feedback, and moderation.
 - A `GET` health check.
 - Runs directly on Cloudflare Workers with no Java, Maven, or WebAssembly build.
 
@@ -26,8 +26,14 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 | `/8ball` | Required `question` | Gives a randomized 8-ball answer. |
 | `/feedback` | Required `message` | Sends anonymous feedback to this server's configured channel. |
 | `/setup-feedback` | Required `channel` (Manage Server) | Set this server's feedback destination. |
+| `/kick` | Required `user`, optional `reason` (Kick Members) | Remove a member from the server. |
+| `/ban` | Required `user`, optional `reason` (Ban Members) | Ban a member from the server. |
+| `/unban` | Required `user_id`, optional `reason` (Ban Members) | Unban a user by Discord ID. |
+| `/timeout` | Required `user`, `minutes` (1–40,320), optional `reason` (Moderate Members) | Temporarily prevent a member from chatting, up to 28 days. |
+| `/untimeout` | Required `user`, optional `reason` (Moderate Members) | Remove a member's timeout. |
+| `/purge` | Required `count` (1–100), optional `reason` (Manage Messages) | Delete recent messages from the current channel. |
 
-This starter set focuses on stateless utility and fun commands; moderation and reminders are not included.
+Moderation responses are only visible to the moderator who ran the command. The bot needs the corresponding Discord permissions, and its role must be higher than members it moderates. `/purge` also needs View Channel and Read Message History; messages older than 14 days are skipped because Discord does not allow them in bulk deletion.
 
 Feedback is posted by the bot without the submitter's username or ID, and the Worker does not store or log the feedback text. This is anonymous to people reading the feedback channel, not to Discord or Cloudflare; users should avoid including identifying details in their message.
 
@@ -46,7 +52,7 @@ npm ci
 npm run typecheck
 ```
 
-In the [Discord Developer Portal](https://discord.com/developers/applications), create or select your application. Copy its **Application ID**, **Public Key**, and bot token. Keep the bot token private; it is used locally to register commands and as a Worker secret to deliver feedback.
+In the [Discord Developer Portal](https://discord.com/developers/applications), create or select your application. Copy its **Application ID**, **Public Key**, and bot token. Keep the bot token private; it is used locally to register commands and as a Worker secret to deliver feedback and moderation actions.
 
 ## Register slash commands
 

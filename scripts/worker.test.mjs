@@ -101,6 +101,8 @@ test("runs the ping and info slash commands", async () => {
 test("runs the help, profile, timestamp, and fun commands", async () => {
   const help = await runCommand("help");
   assert.match(help.data.content, /`\/8ball question`/);
+  assert.match(help.data.content, /`\/timeout user minutes \[reason\]`/);
+  assert.match(help.data.content, /`\/purge count \[reason\]`/);
 
   const userinfo = await runCommand("userinfo");
   assert.match(userinfo.data.content, /Test User/);
@@ -268,6 +270,158 @@ test("delivers feedback without including the submitter's identity", async () =>
     const followup = JSON.parse(requests[1].options.body);
     assert.match(followup.content, /submitted anonymously/);
     assert.equal(followup.flags, 64);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("moderation commands reject members without the required permission", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledDiscord = false;
+  globalThis.fetch = async () => {
+    calledDiscord = true;
+    throw new Error("Discord should not be called for unauthorized members.");
+  };
+
+  try {
+    const response = await worker.fetch(
+      signedRequest({
+        type: 2,
+        guild_id: "123456789012345678",
+        data: {
+          name: "kick",
+          options: [{ name: "user", value: "234567890123456789" }],
+        },
+        member: { permissions: "0" },
+      }),
+      {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+      },
+    );
+    const payload = await response.json();
+
+    assert.equal(payload.data.flags, 64);
+    assert.match(payload.data.content, /Kick Members permission/);
+    assert.equal(calledDiscord, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("timeouts members and records the reason in Discord's audit log", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const response = await worker.fetch(
+      signedRequest({
+        type: 2,
+        guild_id: "123456789012345678",
+        application_id: "application-id",
+        token: "interaction-token",
+        data: {
+          name: "timeout",
+          options: [
+            { name: "user", value: "234567890123456789" },
+            { name: "minutes", value: 15 },
+            { name: "reason", value: "Repeated spam" },
+          ],
+        },
+        member: { permissions: "1099511627776" },
+      }),
+      {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+      },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+    );
+
+    assert.deepEqual(await response.json(), { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    assert.equal(requests.length, 2);
+    assert.match(
+      requests[0].url,
+      /\/guilds\/123456789012345678\/members\/234567890123456789$/,
+    );
+    assert.equal(requests[0].options.method, "PATCH");
+    assert.equal(
+      requests[0].options.headers["X-Audit-Log-Reason"],
+      "Repeated%20spam",
+    );
+    const update = JSON.parse(requests[0].options.body);
+    assert.ok(
+      Math.abs(Date.parse(update.communication_disabled_until) - Date.now() - 15 * 60_000) <
+        10_000,
+    );
+    assert.match(JSON.parse(requests[1].options.body).content, /Timed out/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("purge skips messages older than 14 days", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  const recentMessageId = "345678901234567890";
+  const oldMessageId = "456789012345678901";
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (options.method === "GET") {
+      return Response.json([
+        {
+          id: oldMessageId,
+          timestamp: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+        { id: recentMessageId, timestamp: new Date().toISOString() },
+      ]);
+    }
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const response = await worker.fetch(
+      signedRequest({
+        type: 2,
+        guild_id: "123456789012345678",
+        channel_id: "234567890123456789",
+        application_id: "application-id",
+        token: "interaction-token",
+        data: {
+          name: "purge",
+          options: [
+            { name: "count", value: 2 },
+            { name: "reason", value: "Clean up spam" },
+          ],
+        },
+        member: { permissions: "8192" },
+      }),
+      {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_BOT_TOKEN: "test-bot-token",
+      },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+    );
+
+    assert.deepEqual(await response.json(), { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    assert.equal(requests.length, 3);
+    assert.match(requests[0].url, /\/channels\/234567890123456789\/messages\?limit=2$/);
+    assert.equal(
+      requests[1].url,
+      `https://discord.com/api/v10/channels/234567890123456789/messages/${recentMessageId}`,
+    );
+    assert.equal(requests[1].options.method, "DELETE");
+    assert.match(
+      JSON.parse(requests[2].options.body).content,
+      /Deleted 1 message/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

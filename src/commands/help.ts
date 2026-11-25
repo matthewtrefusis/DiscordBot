@@ -14,6 +14,10 @@ const helpCommand = {
       "**Feedback**",
       "`/feedback message`",
       "`/setup-feedback channel` (Manage Server)",
+      "**Moderation**",
+      "`/kick user [reason]`, `/ban user [reason]`, `/unban user_id [reason]`",
+      "`/timeout user minutes [reason]`, `/untimeout user [reason]`",
+      "`/purge count [reason]` (Manage Messages; messages older than 14 days are skipped)",
     ].join("\n"),
 } satisfies DiscordCommand;
 
