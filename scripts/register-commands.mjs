@@ -32,6 +32,6 @@ if (!applicationId || !botToken) {
   }
 
   console.log(
-    `Registered ${commandDefinitions.length} slash commands${guildId ? " for the selected guild" : " globally"}.`,
+    `Registered ${commandDefinitions.length} application commands${guildId ? " for the selected guild" : " globally"}.`,
   );
 }

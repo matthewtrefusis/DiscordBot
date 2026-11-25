@@ -2,9 +2,12 @@ import {
   getDisplayName,
   getOption,
   getUser,
+  isRecord,
 } from "./helpers";
 import { readReportChannel } from "./report-settings";
-import type { DiscordCommand } from "./types";
+import type { DiscordCommand, KeyValueStore } from "./types";
+
+const REPORT_TTL_SECONDS = 365 * 24 * 60 * 60;
 
 function isMessageLink(value: string, guildId: string): boolean {
   let url: URL;
@@ -23,6 +26,8 @@ function isMessageLink(value: string, guildId: string): boolean {
 }
 
 async function deliverReport(
+  store: KeyValueStore,
+  guildId: string,
   botToken: string,
   channelId: string,
   displayName: string,
@@ -30,6 +35,7 @@ async function deliverReport(
   message: string,
   messageLink: string | undefined,
 ): Promise<string> {
+  const reportId = crypto.randomUUID();
   try {
     const response = await fetch(
       `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`,
@@ -41,7 +47,7 @@ async function deliverReport(
         },
         body: JSON.stringify({
           content: [
-            `**Report from ${displayName}** (<@${userId}>)`,
+            `**Report #${reportId.slice(0, 8)} · Report from ${displayName}** (<@${userId}>)`,
             message,
             ...(messageLink ? [`Message: ${messageLink}`] : []),
           ].join("\n"),
@@ -51,6 +57,42 @@ async function deliverReport(
     );
     if (!response.ok) {
       throw new Error(`Discord returned HTTP ${response.status}.`);
+    }
+    let posted: unknown;
+    try {
+      posted = await response.json();
+    } catch (error) {
+      console.error(
+        "Report was delivered but Discord's message details could not be read:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return "Your report was sent, but moderators may not be able to track its status.";
+    }
+    if (!isRecord(posted) || typeof posted.id !== "string" ||
+        !/^\d{17,20}$/.test(posted.id)) {
+      console.error("Report was delivered but Discord returned an invalid message.");
+      return "Your report was sent, but moderators may not be able to track its status.";
+    }
+    try {
+      await store.put(
+        `report-case:${guildId}:${reportId}`,
+        JSON.stringify({
+          id: reportId,
+          guildId,
+          channelId,
+          messageId: posted.id,
+          reporterId: userId,
+          status: "open",
+          createdAt: Date.now(),
+        }),
+        { expirationTtl: REPORT_TTL_SECONDS },
+      );
+    } catch (error) {
+      console.error(
+        "Report was delivered but its case record could not be saved:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return "Your report was sent, but moderators may not be able to track its status.";
     }
     return "Your report was sent to the moderators.";
   } catch (error) {
@@ -141,10 +183,13 @@ const reportCommand = {
       };
     }
     const displayName = getDisplayName(user ?? {});
+    const store = env.FEEDBACK_CONFIG;
     return {
       content: "Sending your report…",
       ephemeral: true,
       backgroundTask: deliverReport(
+        store,
+        guildId,
         env.DISCORD_BOT_TOKEN,
         channelId,
         displayName,

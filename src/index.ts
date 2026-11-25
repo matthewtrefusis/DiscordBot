@@ -9,6 +9,9 @@ import type {
 import { processDueReminders } from "./reminders";
 import { processDueEvents } from "./events";
 import { processLiveStreamAlerts } from "./streams";
+import { processDuePollReminders } from "./poll-reminders";
+import { processBirthdays } from "./birthdays";
+import { processDueGiveaways } from "./giveaways";
 
 export interface Env extends CommandEnvironment {
   DISCORD_PUBLIC_KEY: string;
@@ -155,6 +158,58 @@ export default {
     executionContext: WorkerExecutionContext,
   ): Promise<Response> {
     if (request.method === "GET") {
+      const exportMatch = /^\/exports\/([0-9a-f-]{36})$/
+        .exec(new URL(request.url).pathname);
+      if (exportMatch && env.FEEDBACK_CONFIG) {
+        const key = `settings-export:${exportMatch[1]}`;
+        const rawExport = await env.FEEDBACK_CONFIG.get(key);
+        if (!rawExport) {
+          return new Response("This export link has expired.", { status: 404 });
+        }
+        let exportData: unknown;
+        try {
+          exportData = JSON.parse(rawExport);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            console.error("Stored settings export is invalid JSON.");
+            return new Response("This export is unavailable.", { status: 500 });
+          }
+          throw error;
+        }
+        if (
+          !isRecord(exportData) ||
+          typeof exportData.guildId !== "string" ||
+          !/^\d{17,20}$/.test(exportData.guildId) ||
+          typeof exportData.exportedAt !== "string" ||
+          !isRecord(exportData.settings) ||
+          Object.keys(exportData.settings).length > 10000 ||
+          !Object.values(exportData.settings).every(
+            (value) => typeof value === "string",
+          )
+        ) {
+          console.error("Stored settings export has an invalid format.");
+          return new Response("This export is unavailable.", { status: 500 });
+        }
+        try {
+          await env.FEEDBACK_CONFIG.delete(key);
+        } catch (error) {
+          console.error(
+            "Could not delete downloaded settings export:",
+            error instanceof Error ? error.message : String(error),
+          );
+          return new Response("This export could not be consumed. Please create a new export link.", {
+            status: 500,
+            headers: { "Cache-Control": "no-store" },
+          });
+        }
+        return new Response(JSON.stringify(exportData, null, 2), {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="discordbot-settings.json"',
+            "Cache-Control": "no-store",
+          },
+        });
+      }
       return jsonResponse({ status: "ok", service: "discord-bot" });
     }
     if (request.method !== "POST") {
@@ -212,6 +267,7 @@ export default {
         env,
         interaction,
         username: getUsername(interaction),
+        requestUrl: request.url,
       };
       return componentResponse(await command.component(context));
     }
@@ -236,6 +292,7 @@ export default {
       env,
       interaction,
       username: getUsername(interaction),
+      requestUrl: request.url,
     };
     if (interaction.type === 4) {
       if (!command.autocomplete) {
@@ -298,8 +355,39 @@ export default {
         );
       },
     );
+    const pollReminderTask = processDuePollReminders(
+      env,
+      controller.scheduledTime,
+    ).catch((error: unknown) => {
+      console.error(
+        "Scheduled poll reminder processing failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+    const birthdayTask = processBirthdays(env, controller.scheduledTime).catch(
+      (error: unknown) => {
+        console.error(
+          "Scheduled birthday processing failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      },
+    );
+    const giveawayTask = processDueGiveaways(env, controller.scheduledTime)
+      .catch((error: unknown) => {
+        console.error(
+          "Scheduled giveaway processing failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      });
     executionContext.waitUntil(
-      Promise.all([reminderTask, streamTask, eventTask]),
+      Promise.all([
+        reminderTask,
+        streamTask,
+        eventTask,
+        pollReminderTask,
+        birthdayTask,
+        giveawayTask,
+      ]),
     );
   },
 };

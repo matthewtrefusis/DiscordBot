@@ -1,10 +1,11 @@
-import { getOption } from "./helpers";
+import { getOption, getUser } from "./helpers";
 import {
   getModerationContext,
   getModerationReason,
   getModerationTargetId,
   MODERATION_PERMISSIONS,
   moderationResponse,
+  moderationActionWithCase,
   requestDiscord,
 } from "./moderation-helpers";
 import type { DiscordCommand } from "./types";
@@ -49,10 +50,12 @@ const timeoutCommand = {
     }
 
     const userId = getModerationTargetId(getOption(interaction, "user"));
+    const moderatorId = getUser(interaction)?.id;
     const minutes = getOption(interaction, "minutes");
     const reason = getModerationReason(getOption(interaction, "reason"));
     if (
       !userId ||
+      typeof moderatorId !== "string" ||
       typeof minutes !== "number" ||
       !Number.isInteger(minutes) ||
       minutes < 1 ||
@@ -67,17 +70,13 @@ const timeoutCommand = {
 
     const until = new Date(Date.now() + minutes * 60_000).toISOString();
     return moderationResponse(
-      requestDiscord({
+      moderationActionWithCase(requestDiscord({
         method: "PATCH",
         path: `/guilds/${encodeURIComponent(context.guildId)}/members/${encodeURIComponent(userId)}`,
         botToken: context.botToken,
         body: { communication_disabled_until: until },
         reason,
-      }).then((result) =>
-        "error" in result
-          ? result.error
-          : `Timed out <@${userId}> for ${minutes} minute${minutes === 1 ? "" : "s"}.`
-      ),
+      }), env.FEEDBACK_CONFIG, context.guildId, userId, moderatorId, "timeout", reason, `Timed out <@${userId}> for ${minutes} minute${minutes === 1 ? "" : "s"}.`),
     );
   },
 } satisfies DiscordCommand;

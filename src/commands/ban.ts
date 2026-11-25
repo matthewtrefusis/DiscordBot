@@ -1,10 +1,11 @@
-import { getOption } from "./helpers";
+import { getOption, getUser } from "./helpers";
 import {
   getModerationContext,
   getModerationReason,
   getModerationTargetId,
   MODERATION_PERMISSIONS,
   moderationResponse,
+  moderationActionWithCase,
   requestDiscord,
 } from "./moderation-helpers";
 import type { DiscordCommand } from "./types";
@@ -39,8 +40,9 @@ const banCommand = {
     }
 
     const userId = getModerationTargetId(getOption(interaction, "user"));
+    const moderatorId = getUser(interaction)?.id;
     const reason = getModerationReason(getOption(interaction, "reason"));
-    if (!userId || reason === null) {
+    if (!userId || reason === null || typeof moderatorId !== "string") {
       return {
         content: "Choose a valid member and a reason of at most 400 characters.",
         ephemeral: true,
@@ -48,14 +50,12 @@ const banCommand = {
     }
 
     return moderationResponse(
-      requestDiscord({
+      moderationActionWithCase(requestDiscord({
         method: "PUT",
         path: `/guilds/${encodeURIComponent(context.guildId)}/bans/${encodeURIComponent(userId)}`,
         botToken: context.botToken,
         reason,
-      }).then((result) =>
-        "error" in result ? result.error : `Banned <@${userId}>.`
-      ),
+      }), env.FEEDBACK_CONFIG, context.guildId, userId, moderatorId, "ban", reason, `Banned <@${userId}>.`),
     );
   },
 } satisfies DiscordCommand;

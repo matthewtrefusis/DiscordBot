@@ -12,6 +12,7 @@ export interface ScheduledEvent {
   startsAt: number;
   createdBy: string;
   attempts: number;
+  participants: string[];
 }
 
 export function eventKey(guildId: string, eventId: string): string {
@@ -55,7 +56,14 @@ export function parseScheduledEvent(value: string): ScheduledEvent | null {
     !/^\d{17,20}$/.test(parsed.createdBy) ||
     typeof parsed.attempts !== "number" ||
     !Number.isInteger(parsed.attempts) ||
-    parsed.attempts < 0
+    parsed.attempts < 0 ||
+    (parsed.participants !== undefined &&
+      (!Array.isArray(parsed.participants) ||
+        !parsed.participants.every(
+          (participant) =>
+            typeof participant === "string" &&
+            /^\d{17,20}$/.test(participant),
+        )))
   ) {
     return null;
   }
@@ -66,6 +74,41 @@ export function parseScheduledEvent(value: string): ScheduledEvent | null {
     startsAt: parsed.startsAt,
     createdBy: parsed.createdBy,
     attempts: parsed.attempts,
+    participants: Array.isArray(parsed.participants)
+      ? parsed.participants as string[]
+      : [],
+  };
+}
+
+export function renderEventAnnouncement(
+  eventId: string,
+  scheduledEvent: ScheduledEvent,
+): { content: string; components: Record<string, unknown>[] } {
+  return {
+    content: [
+      `📅 **${scheduledEvent.title}**`,
+      `Starts <t:${Math.floor(scheduledEvent.startsAt / 1000)}:F>`,
+      `Going: **${scheduledEvent.participants.length}**`,
+    ].join("\n"),
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 3,
+            label: "Going",
+            custom_id: `event:${eventId}:join`,
+          },
+          {
+            type: 2,
+            style: 2,
+            label: "Can't go",
+            custom_id: `event:${eventId}:leave`,
+          },
+        ],
+      },
+    ],
   };
 }
 
@@ -209,15 +252,13 @@ export async function processDueEvents(
 
       try {
         await sendEventAnnouncement(botToken, scheduledEvent);
-        for (const completedKey of [dueEvent.key, key]) {
-          try {
-            await store.delete(completedKey);
-          } catch (error) {
-            console.error(
-              `Could not remove completed event state ${completedKey}:`,
-              error instanceof Error ? error.message : String(error),
-            );
-          }
+        try {
+          await store.delete(dueEvent.key);
+        } catch (error) {
+          console.error(
+            `Could not remove completed event index ${dueEvent.key}:`,
+            error instanceof Error ? error.message : String(error),
+          );
         }
         continue;
       } catch (error) {

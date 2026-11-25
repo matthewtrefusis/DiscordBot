@@ -2,6 +2,7 @@ import { isRecord } from "./helpers";
 import type {
   CommandContext,
   CommandResponse,
+  KeyValueStore,
 } from "./types";
 
 const ADMINISTRATOR = 8n;
@@ -141,6 +142,66 @@ export async function requestDiscord(
     return {
       error: "Discord could not complete that moderation action. Please try again.",
     };
+  }
+}
+
+export async function recordModerationCase(
+  store: KeyValueStore,
+  guildId: string,
+  targetId: string,
+  moderatorId: string,
+  action: string,
+  reason: string,
+): Promise<void> {
+  const createdAt = Date.now();
+  const id = crypto.randomUUID();
+  await store.put(
+    `moderation-case:${guildId}:${String(createdAt).padStart(16, "0")}:${id}`,
+    JSON.stringify({
+      id,
+      guildId,
+      targetId,
+      moderatorId,
+      action,
+      reason,
+      createdAt,
+    }),
+    { expirationTtl: 365 * 24 * 60 * 60 },
+  );
+}
+
+export async function moderationActionWithCase(
+  request: Promise<DiscordRequestResult>,
+  store: KeyValueStore | undefined,
+  guildId: string,
+  targetId: string,
+  moderatorId: string,
+  action: string,
+  reason: string,
+  successMessage: string,
+): Promise<string> {
+  const result = await request;
+  if ("error" in result) return result.error;
+  if (!store) {
+    console.error("Moderation action succeeded without case-history storage.");
+    return `${successMessage} Case history is unavailable because KV is not configured.`;
+  }
+  try {
+    await recordModerationCase(
+      store,
+      guildId,
+      targetId,
+      moderatorId,
+      action,
+      reason,
+    );
+    return successMessage;
+  } catch (error) {
+    console.error(
+      "Moderation action succeeded but its case record could not be saved:",
+      error instanceof Error ? error.message : String(error),
+    );
+    return `${successMessage} The case record could not be saved.`;
   }
 }
 

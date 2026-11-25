@@ -1,10 +1,11 @@
-import { getOption } from "./helpers";
+import { getOption, getUser } from "./helpers";
 import {
   getModerationContext,
   getModerationReason,
   getModerationTargetId,
   MODERATION_PERMISSIONS,
   moderationResponse,
+  moderationActionWithCase,
   requestDiscord,
 } from "./moderation-helpers";
 import type { DiscordCommand } from "./types";
@@ -39,8 +40,9 @@ const untimeoutCommand = {
     }
 
     const userId = getModerationTargetId(getOption(interaction, "user"));
+    const moderatorId = getUser(interaction)?.id;
     const reason = getModerationReason(getOption(interaction, "reason"));
-    if (!userId || reason === null) {
+    if (!userId || reason === null || typeof moderatorId !== "string") {
       return {
         content: "Choose a valid member and a reason of at most 400 characters.",
         ephemeral: true,
@@ -48,15 +50,13 @@ const untimeoutCommand = {
     }
 
     return moderationResponse(
-      requestDiscord({
+      moderationActionWithCase(requestDiscord({
         method: "PATCH",
         path: `/guilds/${encodeURIComponent(context.guildId)}/members/${encodeURIComponent(userId)}`,
         botToken: context.botToken,
         body: { communication_disabled_until: null },
         reason,
-      }).then((result) =>
-        "error" in result ? result.error : `Removed the timeout for <@${userId}>.`
-      ),
+      }), env.FEEDBACK_CONFIG, context.guildId, userId, moderatorId, "untimeout", reason, `Removed the timeout for <@${userId}>.`),
     );
   },
 } satisfies DiscordCommand;

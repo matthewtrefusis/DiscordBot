@@ -29,6 +29,7 @@ export interface CommandContext {
   env: CommandEnvironment;
   interaction: Record<string, unknown>;
   username: string;
+  requestUrl: string;
 }
 
 export interface CommandResponse {
@@ -50,7 +51,7 @@ export interface InteractionCallback {
 export type CommandResult = string | CommandResponse;
 
 export interface CommandOption {
-  type: 3 | 4 | 6 | 7;
+  type: 3 | 4 | 6 | 7 | 8;
   name: string;
   description: string;
   required?: boolean;
@@ -60,11 +61,13 @@ export interface CommandOption {
   max_length?: number;
   channel_types?: number[];
   autocomplete?: boolean;
+  choices?: { name: string; value: string | number }[];
 }
 
 export interface DiscordCommand {
+  type?: 1 | 2 | 3;
   name: string;
-  description: string;
+  description?: string;
   options?: CommandOption[];
   default_member_permissions?: string;
   autocomplete?(context: CommandContext): Promise<AutocompleteChoice[]>;

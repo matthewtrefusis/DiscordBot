@@ -3,6 +3,9 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 import worker from "../src/index.ts";
 import { eventDueKey } from "../src/events.ts";
+import { processBirthdays } from "../src/birthdays.ts";
+import { processDuePollReminders } from "../src/poll-reminders.ts";
+import { processDueGiveaways } from "../src/giveaways.ts";
 import { parseLocalDateTime } from "../src/time-utils.ts";
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -533,6 +536,16 @@ test("configures a private report channel and sends identified reports to it", a
   const { values, store } = createMemoryStore();
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
+    if (
+      String(url).endsWith("/channels/987654321098765432/messages") &&
+      options.method === "POST"
+    ) {
+      return Response.json({ id: "345678901234567890" });
+    }
+    if (
+      String(url).endsWith("/channels/987654321098765432/messages/345678901234567890") &&
+      !options.method
+    ) return Response.json({ content: "**Report from Test User**\nA user is spamming." });
     return new Response(null, { status: 204 });
   };
 
@@ -598,6 +611,36 @@ test("configures a private report channel and sends identified reports to it", a
       posted.content.includes(`https://discord.com/channels/${guildId}/`),
     );
     assert.deepEqual(posted.allowed_mentions, { parse: [] });
+    assert.equal(
+      [...values.keys()].filter((key) => key.startsWith(`report-case:${guildId}:`)).length,
+      1,
+    );
+    const reportKey = [...values.keys()].find((key) =>
+      key.startsWith(`report-case:${guildId}:`)
+    );
+    const reportId = JSON.parse(values.get(reportKey)).id.slice(0, 8);
+    const listed = await runServerManagerCommand(
+      "reports",
+      [],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(listed.data.content, new RegExp(`#${reportId}`));
+    const updated = await runServerManagerCommand(
+      "report-status",
+      [
+        { name: "id", value: reportId },
+        { name: "status", value: "resolved" },
+      ],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(updated.data.content, /resolved/);
+    assert.equal(JSON.parse(values.get(reportKey)).status, "resolved");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -723,6 +766,518 @@ test("creates polls and lets a voter change their choice", async () => {
   }
 });
 
+test("schedules poll reminders and announces opted-in birthdays once", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const guildId = "123456789012345678";
+  const userId = "123456789012345678";
+  const pollId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const { values, store } = createMemoryStore([
+    [`poll:${pollId}`, JSON.stringify({
+      guildId,
+      channelId: "234567890123456789",
+      question: "Which game?",
+      options: ["A", "B"],
+      votes: {},
+      closed: false,
+      messageId: "345678901234567890",
+    })],
+  ]);
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const scheduled = await runServerManagerCommand(
+      "poll-remind",
+      [
+        { name: "poll", value: pollId },
+        { name: "minutes", value: 1 },
+      ],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(scheduled.data.content, /I'll remind the channel/);
+    const dueKey = [...values.keys()].find((key) =>
+      key.startsWith("poll-reminder-due:")
+    );
+    assert.ok(dueKey);
+    const dueAt = Number(dueKey.split(":")[1]);
+    await processDuePollReminders(
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      dueAt,
+    );
+    assert.match(JSON.parse(requests[0].options.body).content, /Which game/);
+    assert.equal(values.has(dueKey), false);
+
+    const now = Date.now();
+    const birthdaySetup = await runServerManagerCommand(
+      "setup-birthdays",
+      [{ name: "channel", value: "987654321098765432" }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {
+        resolved: {
+          channels: {
+            "987654321098765432": { type: 0, guild_id: guildId },
+          },
+        },
+      },
+      guildId,
+    );
+    assert.match(birthdaySetup.data.content, /birthday announcements/);
+    const birthday = await runServerManagerCommand(
+      "birthday-set",
+      [
+        { name: "month", value: new Date(now).getUTCMonth() + 1 },
+        { name: "day", value: new Date(now).getUTCDate() },
+      ],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(birthday.data.content, /opted in/);
+    await processBirthdays(
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      now,
+    );
+    const birthdayRecord = [...values.entries()].find(([key]) =>
+      key.startsWith(`birthday:${guildId}:${userId}`)
+    );
+    assert.ok(birthdayRecord);
+    assert.equal(JSON.parse(birthdayRecord[1]).lastAnnouncedYear, new Date(now).getUTCFullYear());
+    assert.ok(requests.some(({ options }) =>
+      JSON.parse(options.body).content === `🎂 Happy birthday, <@${userId}>!`
+    ));
+    const removed = await runServerManagerCommand(
+      "birthday-remove",
+      [],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(removed.data.content, /removed/);
+    assert.equal(values.has(`birthday:${guildId}:${userId}`), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runs a giveaway, accepts an entry, and selects the only entrant", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  const guildId = "123456789012345678";
+  const channelId = "234567890123456789";
+  const winnerId = "345678901234567890";
+  const { values, store } = createMemoryStore();
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url) === `https://discord.com/api/v10/channels/${channelId}/messages`) {
+      return Response.json({ id: "456789012345678901" });
+    }
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const started = await runServerManagerCommand(
+      "giveaway",
+      [
+        { name: "prize", value: "Game key" },
+        { name: "minutes", value: 1 },
+      ],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+      {},
+      guildId,
+      channelId,
+    );
+    assert.deepEqual(started, { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    const giveawayKey = [...values.keys()].find((key) =>
+      key.startsWith("giveaway:") && !key.startsWith("giveaway-due:")
+    );
+    assert.ok(giveawayKey);
+    const giveaway = JSON.parse(values.get(giveawayKey));
+    const join = await worker.fetch(
+      signedRequest({
+        type: 3,
+        guild_id: guildId,
+        channel_id: channelId,
+        data: { custom_id: `giveaway:${giveaway.id}:toggle` },
+        member: { user: { id: winnerId } },
+      }),
+      { DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store },
+    );
+    const joinPayload = await join.json();
+    assert.equal(joinPayload.type, 7);
+    assert.match(joinPayload.data.content, /Entries: \*\*1\*\*/);
+
+    await processDueGiveaways(
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      giveaway.endsAt,
+    );
+    const finalUpdate = requests.find(({ options }) => options.method === "PATCH");
+    assert.ok(finalUpdate);
+    assert.match(JSON.parse(finalUpdate.options.body).content, new RegExp(`<@${winnerId}>`));
+    assert.equal(values.has(giveawayKey), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("manages FAQs and limits self-assignment to configured roles", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const guildId = "123456789012345678";
+  const roleId = "987654321098765432";
+  const { values, store } = createMemoryStore();
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const addedFaq = await runServerManagerCommand(
+      "faq-add",
+      [
+        { name: "question", value: "Where is the guide?" },
+        { name: "answer", value: "Read #getting-started." },
+      ],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(addedFaq.data.content, /Added FAQ/);
+    const faq = await runServerManagerCommand(
+      "faq",
+      [{ name: "query", value: "guide" }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(faq.data.content, /Read #getting-started/);
+    assert.equal(faq.data.flags, 64);
+
+    const roleAdded = await runServerManagerCommand(
+      "self-role-add",
+      [{ name: "role", value: roleId }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {
+        resolved: {
+          roles: {
+            [roleId]: { id: roleId, permissions: "0", managed: false },
+          },
+        },
+      },
+      guildId,
+    );
+    assert.match(roleAdded.data.content, /Members can now toggle/);
+    const toggled = await runServerManagerCommand(
+      "self-role",
+      [{ name: "role", value: roleId }],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(toggled.data.content, /Added/);
+    assert.equal(requests[0].options.method, "PUT");
+    assert.match(requests[0].url, new RegExp(`/members/123456789012345678/roles/${roleId}`));
+    assert.ok(values.has(`self-roles:${guildId}`));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("posts anonymous suggestions, records votes, and changes their status", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  const guildId = "123456789012345678";
+  const userId = "234567890123456789";
+  const channelId = "987654321098765432";
+  const { values, store } = createMemoryStore();
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url) === `https://discord.com/api/v10/channels/${channelId}/messages`) {
+      return Response.json({ id: "345678901234567890" });
+    }
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const setup = await runServerManagerCommand(
+      "setup-suggestions",
+      [{ name: "channel", value: channelId }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      { resolved: { channels: { [channelId]: { type: 0, guild_id: guildId } } } },
+      guildId,
+    );
+    assert.match(setup.data.content, /Suggestions will be posted/);
+    const submitted = await runServerManagerCommand(
+      "suggest",
+      [{ name: "idea", value: "Add a monthly community event." }],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+      {},
+      guildId,
+    );
+    assert.deepEqual(submitted, { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    const postBody = JSON.parse(requests[0].options.body);
+    assert.match(postBody.content, /Add a monthly community event/);
+    assert.equal(postBody.content.includes(userId), false);
+    const [suggestionKey] = [...values.keys()].filter((key) =>
+      key.startsWith(`suggestion:${guildId}:`)
+    );
+    assert.ok(suggestionKey);
+    const suggestion = JSON.parse(values.get(suggestionKey));
+    const voted = await worker.fetch(
+      signedRequest({
+        type: 3,
+        guild_id: guildId,
+        channel_id: channelId,
+        data: { custom_id: `suggest:${suggestion.id}:up` },
+        member: { user: { id: userId } },
+      }),
+      { DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store },
+    );
+    assert.match((await voted.json()).data.content, /👍 1/);
+
+    const status = await runServerManagerCommand(
+      "suggestion-status",
+      [
+        { name: "id", value: suggestion.id.slice(0, 8) },
+        { name: "status", value: "accepted" },
+      ],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(status.data.content, /accepted/);
+    assert.equal(JSON.parse(values.get(suggestionKey)).status, "accepted");
+    assert.ok(requests.some(({ options }) => options.method === "PATCH"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("creates private tickets with one open ticket per member", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const guildId = "123456789012345678";
+  const userId = "123456789012345678";
+  const categoryId = "345678901234567890";
+  const channelId = "456789012345678901";
+  const botId = "567890123456789012";
+  const staffRoleId = "678901234567890123";
+  const { values, store } = createMemoryStore();
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url).endsWith("/users/@me")) return Response.json({ id: botId });
+    if (String(url).endsWith(`/channels/${categoryId}`) && !options.method) {
+      return Response.json({
+        permission_overwrites: [
+          { id: guildId, type: 0, allow: "0", deny: "0" },
+          { id: staffRoleId, type: 0, allow: "1024", deny: "0" },
+        ],
+      });
+    }
+    if (String(url).endsWith(`/guilds/${guildId}/channels`)) {
+      return Response.json({ id: channelId, guild_id: guildId });
+    }
+    return new Response(null, { status: 204 });
+  };
+
+  try {
+    const setup = await runServerManagerCommand(
+      "setup-tickets",
+      [{ name: "category", value: categoryId }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      { resolved: { channels: { [categoryId]: { type: 4, guild_id: guildId } } } },
+      guildId,
+    );
+    assert.match(setup.data.content, /created in that category/);
+    const opened = await runServerManagerCommand(
+      "ticket",
+      [],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(opened.data.content, new RegExp(`<#${channelId}>`));
+    const createRequest = requests.find(({ url }) => url.endsWith(`/guilds/${guildId}/channels`));
+    const permissions = JSON.parse(createRequest.options.body).permission_overwrites;
+    const everyone = permissions.find(({ id }) => id === guildId);
+    assert.equal(BigInt(everyone.deny) & 1024n, 1024n);
+    assert.equal(permissions.some(({ id }) => id === userId), true);
+    assert.equal(
+      BigInt(permissions.find(({ id }) => id === staffRoleId).allow) & 1024n,
+      1024n,
+    );
+    assert.ok(values.has(`ticket:${guildId}:${channelId}`));
+
+    const duplicate = await runServerManagerCommand(
+      "ticket",
+      [],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      undefined,
+      {},
+      guildId,
+    );
+    assert.match(duplicate.data.content, /already have an open ticket/);
+    assert.equal(requests.filter(({ url }) => url.endsWith(`/guilds/${guildId}/channels`)).length, 1);
+
+    const closed = await worker.fetch(
+      signedRequest({
+        type: 3,
+        guild_id: guildId,
+        channel_id: channelId,
+        data: { custom_id: `ticket:${guildId}:${channelId}:close` },
+        member: { user: { id: userId } },
+      }),
+      { DISCORD_PUBLIC_KEY: publicKeyHex, DISCORD_BOT_TOKEN: "test-bot-token", FEEDBACK_CONFIG: store },
+    );
+    assert.equal((await closed.json()).type, 7);
+    assert.equal(JSON.parse(values.get(`ticket:${guildId}:${channelId}`)).closed, true);
+    assert.ok(requests.some(({ options }) => options.method === "PUT" &&
+      String(options.body).includes("2048")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("exports only server settings through a one-time download link", async () => {
+  const guildId = "123456789012345678";
+  const { values, store } = createMemoryStore([
+    [`feedback-settings:${guildId}`, JSON.stringify({ channelId: "987654321098765432", categories: ["Bug"] })],
+    [`poll:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`, JSON.stringify({ voterId: "234567890123456789" })],
+  ]);
+  const command = await runServerManagerCommand(
+    "settings-export",
+    [],
+    { FEEDBACK_CONFIG: store },
+    undefined,
+    {},
+    guildId,
+  );
+  const downloadUrl = /https:\/\/bot\.example\/exports\/[0-9a-f-]{36}/.exec(command.data.content)?.[0];
+  assert.ok(downloadUrl);
+  const download = await worker.fetch(
+    new Request(downloadUrl),
+    { DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store },
+  );
+  assert.equal(download.status, 200);
+  const exported = await download.json();
+  assert.equal(exported.guildId, guildId);
+  assert.deepEqual(Object.keys(exported.settings), [`feedback-settings:${guildId}`]);
+  assert.equal([...values.keys()].some((key) => key.startsWith("settings-export:")), false);
+  const repeated = await worker.fetch(
+    new Request(downloadUrl),
+    { DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store },
+  );
+  assert.equal(repeated.status, 404);
+});
+
+test("quotes a context-menu message without pinging mentions", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const backgroundTasks = [];
+  const guildId = "123456789012345678";
+  const channelId = "234567890123456789";
+  const messageId = "345678901234567890";
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const response = await runServerManagerCommand(
+      "Quote message",
+      [],
+      { DISCORD_BOT_TOKEN: "test-bot-token" },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+      {
+        target_id: messageId,
+        resolved: {
+          messages: {
+            [messageId]: {
+              id: messageId,
+              guild_id: guildId,
+              channel_id: channelId,
+              content: "@everyone please review this.",
+              author: { id: "456789012345678901", username: "author" },
+            },
+          },
+        },
+      },
+      guildId,
+      channelId,
+    );
+    assert.deepEqual(response, { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    const posted = JSON.parse(requests[0].options.body);
+    assert.match(posted.content, /@everyone please review this/);
+    assert.match(posted.content, new RegExp(messageId));
+    assert.deepEqual(posted.allowed_mentions, { parse: [] });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("channel lock restores the previous @everyone permission overwrite", async () => {
+  const originalFetch = globalThis.fetch;
+  const guildId = "123456789012345678";
+  const channelId = "234567890123456789";
+  const { store } = createMemoryStore();
+  let overwrites = [{ id: guildId, type: 0, allow: "1024", deny: "0" }];
+  globalThis.fetch = async (url, options) => {
+    if (!options.method || options.method === "GET") return Response.json({ permission_overwrites: overwrites });
+    if (options.method === "PATCH") {
+      overwrites = JSON.parse(options.body).permission_overwrites;
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${options.method} ${url}`);
+  };
+
+  async function invoke(name) {
+    return worker.fetch(
+      signedRequest({
+        type: 2,
+        guild_id: guildId,
+        channel_id: channelId,
+        data: { name },
+        member: { permissions: "16", user: { id: "345678901234567890" } },
+      }),
+      { DISCORD_PUBLIC_KEY: publicKeyHex, DISCORD_BOT_TOKEN: "test-bot-token", FEEDBACK_CONFIG: store },
+    );
+  }
+
+  try {
+    const locked = await invoke("channel-lock");
+    assert.match((await locked.json()).data.content, /Locked/);
+    assert.equal(BigInt(overwrites[0].deny) & 2048n, 2048n);
+    const unlocked = await invoke("channel-unlock");
+    assert.match((await unlocked.json()).data.content, /Restored/);
+    assert.equal(overwrites[0].allow, "1024");
+    assert.equal(overwrites[0].deny, "0");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("sets a timezone and schedules reminders at local times", async () => {
   const { values, store } = createMemoryStore();
   const timezone = await runCommand(
@@ -770,6 +1325,7 @@ test("rejects daylight-saving gaps and ambiguous local reminder times", () => {
 test("schedules and delivers events and lists or cancels upcoming ones", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
+  const backgroundTasks = [];
   const guildId = "123456789012345678";
   const userId = "123456789012345678";
   const { values, store } = createMemoryStore([
@@ -777,6 +1333,9 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
   ]);
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
+    if (String(url).endsWith("/channels/234567890123456789/messages")) {
+      return Response.json({ id: "345678901234567890" });
+    }
     return new Response(null, { status: 204 });
   };
 
@@ -791,16 +1350,38 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
         { name: "title", value: "Community meetup" },
         { name: "local_time", value: localTime },
       ],
+      { FEEDBACK_CONFIG: store, DISCORD_BOT_TOKEN: "test-bot-token" },
+      { waitUntil: (task) => backgroundTasks.push(task) },
+      {},
+      guildId,
+    );
+    assert.deepEqual(scheduled, { type: 5, data: { flags: 64 } });
+    await Promise.all(backgroundTasks);
+    const eventKey = [...values.keys()].find((key) =>
+      key.startsWith(`event:${guildId}:`)
+    );
+    assert.ok(eventKey);
+    const eventId = eventKey.slice(eventKey.lastIndexOf(":") + 1);
+    const rsvp = await worker.fetch(
+      signedRequest({
+        type: 3,
+        guild_id: guildId,
+        channel_id: "234567890123456789",
+        data: { custom_id: `event:${eventId}:join` },
+        member: { user: { id: userId } },
+      }),
+      { DISCORD_PUBLIC_KEY: publicKeyHex, FEEDBACK_CONFIG: store },
+    );
+    assert.equal((await rsvp.json()).type, 7);
+    const attendees = await runServerManagerCommand(
+      "event-attendees",
+      [{ name: "event", value: eventId }],
       { FEEDBACK_CONFIG: store },
       undefined,
       {},
       guildId,
     );
-    assert.match(scheduled.data.content, /Community meetup/);
-    const eventKey = [...values.keys()].find((key) =>
-      key.startsWith(`event:${guildId}:`)
-    );
-    assert.ok(eventKey);
+    assert.match(attendees.data.content, /123456789012345678/);
 
     const listed = await runServerManagerCommand(
       "events",
@@ -839,7 +1420,6 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
     );
 
     const event = JSON.parse(values.get(eventKey));
-    const eventId = eventKey.slice(eventKey.lastIndexOf(":") + 1);
     values.delete(eventDueKey(event.startsAt, guildId, eventId));
     values.set(eventKey, JSON.stringify({ ...event, startsAt: 0 }));
     const dueEventIndex = eventDueKey(0, guildId, eventId);
@@ -854,7 +1434,7 @@ test("schedules and delivers events and lists or cancels upcoming ones", async (
       { waitUntil: (task) => { scheduledTask = task; } },
     );
     await scheduledTask;
-    assert.equal(values.has(eventKey), false);
+    assert.equal(values.has(eventKey), true);
     assert.equal(values.has(dueEventIndex), false);
     assert.match(JSON.parse(requests[0].options.body).content, /Community meetup/);
   } finally {
@@ -1516,6 +2096,7 @@ test("timeouts members and records the reason in Discord's audit log", async () 
   const originalFetch = globalThis.fetch;
   const requests = [];
   const backgroundTasks = [];
+  const { values, store } = createMemoryStore();
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
     return new Response(null, { status: 204 });
@@ -1536,11 +2117,15 @@ test("timeouts members and records the reason in Discord's audit log", async () 
             { name: "reason", value: "Repeated spam" },
           ],
         },
-        member: { permissions: "1099511627776" },
+        member: {
+          permissions: "1099511627776",
+          user: { id: "123456789012345678", username: "moderator" },
+        },
       }),
       {
         DISCORD_PUBLIC_KEY: publicKeyHex,
         DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
       },
       { waitUntil: (task) => backgroundTasks.push(task) },
     );
@@ -1563,6 +2148,22 @@ test("timeouts members and records the reason in Discord's audit log", async () 
         10_000,
     );
     assert.match(JSON.parse(requests[1].options.body).content, /Timed out/);
+    assert.equal(
+      [...values.values()].some((value) =>
+        JSON.parse(value).action === "timeout"
+      ),
+      true,
+    );
+    const cases = await runServerManagerCommand(
+      "mod-cases",
+      [{ name: "user", value: "234567890123456789" }],
+      { FEEDBACK_CONFIG: store },
+      undefined,
+      {},
+      "123456789012345678",
+    );
+    assert.match(cases.data.content, /timeout/);
+    assert.match(cases.data.content, /Repeated spam/);
   } finally {
     globalThis.fetch = originalFetch;
   }

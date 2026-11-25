@@ -41,6 +41,31 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers, offering 
 | `/event` | Required `title`, `local_time` (Manage Server) | Schedules an announcement in the current channel. |
 | `/events` | None | Lists upcoming scheduled event announcements. |
 | `/event-cancel` | Required `event` (Manage Server) | Cancels an upcoming scheduled event. |
+| `/event-attendees` | Required `event` | Privately lists members who RSVP'd to an event. |
+| `/poll-remind` | Required `poll`, `minutes` (Manage Server) | Schedules a channel reminder for an open poll. |
+| `/giveaway` | Required `prize`, `minutes` (Manage Server) | Starts a timed giveaway with one entry per member and a randomly selected winner. |
+| `/setup-birthdays` | Required `channel` (Manage Server) | Sets the channel for opted-in birthday announcements. |
+| `/birthday-set` | Required `month`, `day` | Opts you in to an annual birthday announcement; no birth year is collected. |
+| `/birthday-remove` | None | Removes your birthday date and opts you out. |
+| `/setup-suggestions` | Required `channel` (Manage Server) | Sets the public community suggestion board. |
+| `/suggest` | Required `idea` | Posts an anonymous suggestion with upvote/downvote buttons. |
+| `/suggestion-status` | Required `id`, `status` (Manage Server) | Accepts or declines a suggestion. |
+| `/faq` | Optional `query` | Searches the server FAQ privately. |
+| `/faq-add` | Required `question`, `answer` (Manage Server) | Adds an FAQ entry. |
+| `/faq-remove` | Required `question` (Manage Server) | Removes an FAQ entry. |
+| `/self-role-add` | Required `role` (Manage Server) | Allows members to self-assign or remove a role. |
+| `/self-role-remove` | Required `role` (Manage Server) | Removes a role from the self-assignment list. |
+| `/self-role` | Required `role` | Toggles one configured self-assignable role. |
+| `/setup-tickets` | Required `category` (Manage Server) | Sets the category for private support tickets. |
+| `/ticket` | None | Creates a private support channel with a close button. |
+| `Quote message` | Message context menu | Quotes a message and links to the original. |
+| `/reports` | None (Manage Server) | Lists open reports and their status. |
+| `/report-status` | Required `id`, `status` (Manage Server) | Updates a report's review status. |
+| `/warn` | Required `user`, `reason` (Moderate Members) | Records a warning in the member's moderation history. |
+| `/mod-cases` | Required `user` (Manage Server) | Shows a member's recent moderation history. |
+| `/channel-lock` | None (Manage Channels) | Denies @everyone permission to send messages, preserving prior channel permissions for restoration. |
+| `/channel-unlock` | None (Manage Channels) | Restores the previous @everyone channel permissions. |
+| `/settings-export` | None (Manage Server) | Creates a one-time settings download link that expires after 60 seconds. |
 | `/setup-stream-alerts` | Required `channel` (Manage Server) | Chooses this server's livestream announcement channel. |
 | `/stream-add` | Required `channel_url` (Manage Server) | Adds a YouTube or Twitch channel URL to live and video alerts. |
 | `/stream-remove` | Required `channel_url` (Manage Server) | Removes a configured YouTube or Twitch alert source. |
@@ -60,6 +85,8 @@ Moderation responses are only visible to the moderator who ran the command. The 
 Feedback is posted by the bot without the submitter's username or ID, and the Worker does not store or log the feedback text. It stores category totals only for `/feedback-stats`. This is anonymous to people reading the feedback channel, not to Discord or Cloudflare; users should avoid including identifying details in their message. Reports are different: `/report` includes the submitter's username and ID and should be configured to a private moderator channel.
 
 Poll options, vote counts, and voter IDs are stored in Cloudflare KV so voters can change their choice. Reminder text, recipient IDs, and due times are also stored in KV until delivery. A once-per-minute Cron Trigger sends reminders by DM and retries failed deliveries up to five times; users must allow DMs from the bot.
+
+Event RSVP lists, poll reminders, giveaway entries, suggestions and votes, FAQ entries, self-role allowlists, ticket metadata, report statuses, and moderation cases are stored in Cloudflare KV. Birthday announcements are opt-in and use only month/day; dates are interpreted in UTC, and the date remains stored until the member opts out. Moderation cases and report status records are retained for up to one year; ticket records are retained for 30 days. Suggestions are anonymous on the public board, but their text and votes are stored by the Worker. A once-per-minute Cron Trigger closes giveaways and sends birthday and poll reminders.
 
 Stream alerts check configured YouTube and Twitch channels every five minutes. They announce stream starts, new standard YouTube uploads, and Twitch archive VODs; a Twitch VOD is suppressed if the bot already announced its live stream. YouTube live streams and their recordings are not announced twice. Use `/stream-pause` and `/stream-resume` to control an individual source, and `/stream-test` to check the destination channel. YouTube checks use two read requests per channel per poll (1 quota unit each); with YouTube's default 10,000-unit daily allowance, keep the total monitored YouTube sources across servers modest. Each server can configure up to 10 sources. Stream state and Twitch's short-lived app access token are cached in KV to avoid duplicate announcements and unnecessary token requests.
 
@@ -117,7 +144,9 @@ After adding the bot to a server, a member with **Manage Server** permission can
 
 To configure alerts, run `/setup-stream-alerts channel:#announcements`, then add channels with `/stream-add channel_url:<URL>`. The bot needs permission to view and send messages in the selected channel. Supported YouTube URLs use `/channel/ID`, `/@handle`, or `/user/name`; Twitch URLs use `https://www.twitch.tv/<username>`. Use the same URL with `/stream-remove` to remove a source, and `/stream-list` to review settings. Each server can track up to 10 sources.
 
-Set a personal timezone using `/timezone timezone:Europe/London` before scheduling local-time reminders or events. `/event` and `/event-cancel` require **Manage Server**; event announcements are sent to the channel where they were scheduled.
+Set a personal timezone using `/timezone timezone:Europe/London` before scheduling local-time reminders or events. `/event`, `/event-cancel`, and `/event-attendees` work with scheduled events; announcements are sent to the channel where they were scheduled.
+
+Configure birthdays with `/setup-birthdays channel:#birthdays`; members opt in with `/birthday-set month day` and can remove their date with `/birthday-remove`. Configure a suggestion board with `/setup-suggestions`, support tickets with `/setup-tickets`, and the FAQ using `/faq-add`. Give the bot Manage Channels and set the ticket category's permissions for support staff; ticket channels inherit the category's staff access while remaining hidden from @everyone. Self-assignable roles must first be added with `/self-role-add`; the bot needs Manage Roles and its highest role must be above each configured role. Use `/channel-lock` and `/channel-unlock` in a text channel; locking saves the prior @everyone overwrite to restore it later. Moderator reports can be reviewed using `/reports` and `/report-status`. `/settings-export` includes server configuration only, not member-specific reminders, birthdays, votes, or case history, and its download link expires after 60 seconds and is deleted after download.
 
 ## Deploy
 
