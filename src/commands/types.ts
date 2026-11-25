@@ -1,6 +1,9 @@
 export interface CommandEnvironment {
   DISCORD_BOT_TOKEN?: string;
   FEEDBACK_CONFIG?: KeyValueStore;
+  YOUTUBE_API_KEY?: string;
+  TWITCH_CLIENT_ID?: string;
+  TWITCH_CLIENT_SECRET?: string;
 }
 
 export interface KeyValueStore {

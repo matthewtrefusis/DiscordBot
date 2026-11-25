@@ -1,8 +1,6 @@
 import { getOption, isRecord } from "./helpers";
-import {
-  canManageFeedback,
-  feedbackSettingsKey,
-} from "./feedback-settings";
+import { feedbackSettingsKey } from "./feedback-settings";
+import { canManageServer } from "./permissions";
 import type { DiscordCommand } from "./types";
 
 function parseCategories(value: unknown): string[] | null {
@@ -53,7 +51,7 @@ const setupFeedbackCommand = {
         ephemeral: true,
       };
     }
-    if (!canManageFeedback(interaction)) {
+    if (!canManageServer(interaction)) {
       return {
         content: "You need Manage Server permission to configure feedback.",
         ephemeral: true,

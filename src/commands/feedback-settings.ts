@@ -1,27 +1,9 @@
 import { isRecord } from "./helpers";
 import type { CommandEnvironment } from "./types";
 
-const MANAGE_GUILD = 32n;
-const ADMINISTRATOR = 8n;
-
 export interface FeedbackSettings {
   channelId: string;
   categories: string[];
-}
-
-export function canManageFeedback(interaction: Record<string, unknown>): boolean {
-  const member = interaction.member;
-  if (!isRecord(member)) {
-    return false;
-  }
-
-  const permissions = member.permissions;
-  if (typeof permissions !== "string" || !/^\d+$/.test(permissions)) {
-    return false;
-  }
-
-  const value = BigInt(permissions);
-  return (value & (MANAGE_GUILD | ADMINISTRATOR)) !== 0n;
 }
 
 export function feedbackSettingsKey(guildId: string): string {

@@ -69,6 +69,50 @@ async function runAutocomplete(name, options, envOverrides = {}) {
   return response.json();
 }
 
+function createMemoryStore(initialEntries = []) {
+  const values = new Map(initialEntries);
+  return {
+    values,
+    store: {
+      get: async (key) => values.get(key) ?? null,
+      put: async (key, value) => values.set(key, value),
+      delete: async (key) => values.delete(key),
+      list: async ({ prefix }) => ({
+        keys: [...values.keys()]
+          .filter((name) => name.startsWith(prefix))
+          .map((name) => ({ name })),
+        list_complete: true,
+      }),
+    },
+  };
+}
+
+async function runServerManagerCommand(
+  name,
+  options,
+  envOverrides,
+  executionContext,
+  additionalData = {},
+) {
+  const response = await worker.fetch(
+    signedRequest({
+      type: 2,
+      guild_id: "guild-id",
+      application_id: "345678901234567890",
+      token: "test-interaction-token",
+      data: { name, options, ...additionalData },
+      member: {
+        permissions: "32",
+        user: { id: "123456789012345678", username: "tester" },
+      },
+    }),
+    { DISCORD_PUBLIC_KEY: publicKeyHex, ...envOverrides },
+    executionContext,
+  );
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
 test("acknowledges a correctly signed Discord PING", async () => {
   const response = await worker.fetch(signedRequest({ type: 1 }), {
     DISCORD_PUBLIC_KEY: publicKeyHex,
@@ -604,6 +648,473 @@ test("stores reminders and delivers due reminders by DM", async () => {
       { recipient_id: "123456789012345678" },
     );
     assert.match(JSON.parse(requests[1].options.body).content, /Check the oven/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("adds a Twitch channel from its URL through Discord", async () => {
+  const originalFetch = globalThis.fetch;
+  const { values, store } = createMemoryStore([
+    [
+      "stream-settings:guild-id",
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [],
+      }),
+    ],
+  ]);
+  const requests = [];
+  globalThis.fetch = async (input, options) => {
+    const url = String(input);
+    requests.push({ url, options });
+    if (url === "https://id.twitch.tv/oauth2/token") {
+      return Response.json({
+        access_token: "test-twitch-token",
+        expires_in: 3600,
+      });
+    }
+    if (url === "https://api.twitch.tv/helix/users?login=samplechannel") {
+      return Response.json({
+        data: [{
+          id: "123456789",
+          display_name: "SampleChannel",
+          login: "samplechannel",
+        }],
+      });
+    }
+    if (url.startsWith("https://discord.com/api/v10/webhooks/")) {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    let backgroundTask;
+    const response = await runServerManagerCommand(
+      "stream-add",
+      [{
+        name: "channel_url",
+        value: "https://www.twitch.tv/SampleChannel",
+      }],
+      {
+        FEEDBACK_CONFIG: store,
+        TWITCH_CLIENT_ID: "test-client-id",
+        TWITCH_CLIENT_SECRET: "test-client-secret",
+      },
+      { waitUntil: (task) => { backgroundTask = task; } },
+    );
+
+    assert.deepEqual(response, {
+      type: 5,
+      data: { flags: 64 },
+    });
+    await backgroundTask;
+
+    const settings = JSON.parse(values.get("stream-settings:guild-id"));
+    assert.equal(settings.sources.length, 1);
+    assert.equal(settings.sources[0].platform, "twitch");
+    assert.equal(settings.sources[0].url, "https://www.twitch.tv/samplechannel");
+    assert.equal(settings.sources[0].channelId, "123456789");
+    assert.equal(requests.length, 3);
+    assert.equal(
+      requests[1].options.headers.Authorization,
+      "Bearer test-twitch-token",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("adds a YouTube channel from its URL through Discord", async () => {
+  const originalFetch = globalThis.fetch;
+  const { values, store } = createMemoryStore([
+    [
+      "stream-settings:guild-id",
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [],
+      }),
+    ],
+  ]);
+  const requests = [];
+  globalThis.fetch = async (input, options) => {
+    const url = String(input);
+    requests.push({ url, options });
+    if (url.startsWith("https://www.googleapis.com/youtube/v3/channels?")) {
+      return Response.json({
+        items: [{
+          id: "UCabcdefghijklmnopqrstuv",
+          snippet: { title: "Example YouTube Channel" },
+          contentDetails: {
+            relatedPlaylists: { uploads: "UUabcdefghijklmnopqrstuv" },
+          },
+        }],
+      });
+    }
+    if (url.startsWith("https://discord.com/api/v10/webhooks/")) {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    let backgroundTask;
+    const response = await runServerManagerCommand(
+      "stream-add",
+      [{
+        name: "channel_url",
+        value: "https://www.youtube.com/@ExampleHandle/streams?sub_confirmation=1",
+      }],
+      {
+        FEEDBACK_CONFIG: store,
+        YOUTUBE_API_KEY: "test-youtube-key",
+      },
+      { waitUntil: (task) => { backgroundTask = task; } },
+    );
+
+    assert.deepEqual(response, {
+      type: 5,
+      data: { flags: 64 },
+    });
+    await backgroundTask;
+
+    const settings = JSON.parse(values.get("stream-settings:guild-id"));
+    assert.equal(settings.sources.length, 1);
+    assert.equal(settings.sources[0].platform, "youtube");
+    assert.equal(settings.sources[0].url, "https://www.youtube.com/@examplehandle");
+    assert.equal(settings.sources[0].channelId, "UCabcdefghijklmnopqrstuv");
+    assert.equal(
+      settings.sources[0].uploadsPlaylistId,
+      "UUabcdefghijklmnopqrstuv",
+    );
+    assert.match(requests[0].url, /forHandle=ExampleHandle/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("changes the livestream announcement channel without dropping sources", async () => {
+  const { values, store } = createMemoryStore([
+    [
+      "stream-settings:guild-id",
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [{
+          platform: "twitch",
+          url: "https://www.twitch.tv/samplechannel",
+          channelId: "123456789",
+          channelLogin: "samplechannel",
+          displayName: "SampleChannel",
+        }],
+      }),
+    ],
+  ]);
+  const response = await runServerManagerCommand(
+    "setup-stream-alerts",
+    [{ name: "channel", value: "987654321098765432" }],
+    { FEEDBACK_CONFIG: store },
+    undefined,
+    {
+      resolved: {
+        channels: {
+          "987654321098765432": {
+            type: 0,
+            guild_id: "guild-id",
+          },
+        },
+      },
+    },
+  );
+
+  assert.match(response.data.content, /<#987654321098765432>/);
+  const settings = JSON.parse(values.get("stream-settings:guild-id"));
+  assert.equal(settings.channelId, "987654321098765432");
+  assert.equal(settings.sources.length, 1);
+  assert.equal(settings.sources[0].channelId, "123456789");
+});
+
+test("announces a new YouTube livestream and respects the polling interval", async () => {
+  const originalFetch = globalThis.fetch;
+  const streamSettingsKey = "stream-settings:123456789012345678";
+  const { values, store } = createMemoryStore([
+    [
+      streamSettingsKey,
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [{
+          platform: "youtube",
+          url: "https://www.youtube.com/@example",
+          channelId: "UCabcdefghijklmnopqrstuv",
+          displayName: "Example Channel",
+          uploadsPlaylistId: "UUabcdefghijklmnopqrstuv",
+        }],
+      }),
+    ],
+  ]);
+  const requests = [];
+  globalThis.fetch = async (input, options) => {
+    const url = String(input);
+    requests.push({ url, options });
+    if (url.startsWith("https://www.googleapis.com/youtube/v3/playlistItems?")) {
+      return Response.json({
+        items: [{ contentDetails: { videoId: "live-video-id" } }],
+      });
+    }
+    if (url.startsWith("https://www.googleapis.com/youtube/v3/videos?")) {
+      return Response.json({
+        items: [{
+          id: "live-video-id",
+          snippet: {
+            title: "We are live",
+            liveBroadcastContent: "live",
+          },
+        }],
+      });
+    }
+    if (url === "https://discord.com/api/v10/channels/234567890123456789/messages") {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  const runScheduled = async (scheduledTime) => {
+    let scheduledTask;
+    await worker.scheduled(
+      { scheduledTime },
+      {
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+        YOUTUBE_API_KEY: "test-youtube-key",
+      },
+      { waitUntil: (task) => { scheduledTask = task; } },
+    );
+    await scheduledTask;
+  };
+
+  try {
+    const now = Date.now();
+    await runScheduled(now);
+
+    assert.equal(requests.length, 3);
+    const announcement = JSON.parse(requests[2].options.body);
+    assert.match(announcement.content, /Example Channel is live: We are live/);
+    assert.match(announcement.content, /youtube\.com\/watch\?v=live-video-id/);
+    assert.deepEqual(announcement.allowed_mentions, { parse: [] });
+
+    const savedSettings = JSON.parse(values.get(streamSettingsKey));
+    assert.equal(savedSettings.sources[0].activeStreamId, "live-video-id");
+    assert.equal(savedSettings.sources[0].lastCheckedAt, now);
+
+    await runScheduled(now + 60_000);
+    assert.equal(requests.length, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("announces new YouTube uploads but skips livestream recordings", async () => {
+  const originalFetch = globalThis.fetch;
+  const now = Date.now();
+  const streamSettingsKey = "stream-settings:123456789012345678";
+  const { values, store } = createMemoryStore([
+    [
+      streamSettingsKey,
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [{
+          platform: "youtube",
+          url: "https://www.youtube.com/@example",
+          channelId: "UCabcdefghijklmnopqrstuv",
+          displayName: "Example Channel",
+          uploadsPlaylistId: "UUabcdefghijklmnopqrstuv",
+          addedAt: now - 60_000,
+        }],
+      }),
+    ],
+  ]);
+  const requests = [];
+  globalThis.fetch = async (input, options) => {
+    const url = String(input);
+    requests.push({ url, options });
+    if (url.startsWith("https://www.googleapis.com/youtube/v3/playlistItems?")) {
+      return Response.json({
+        items: [
+          {
+            contentDetails: {
+              videoId: "new-upload",
+              videoPublishedAt: new Date(now - 5_000).toISOString(),
+            },
+          },
+          {
+            contentDetails: {
+              videoId: "stream-recording",
+              videoPublishedAt: new Date(now - 10_000).toISOString(),
+            },
+          },
+          {
+            contentDetails: {
+              videoId: "old-upload",
+              videoPublishedAt: new Date(now - 120_000).toISOString(),
+            },
+          },
+        ],
+      });
+    }
+    if (url.startsWith("https://www.googleapis.com/youtube/v3/videos?")) {
+      return Response.json({
+        items: [
+          {
+            id: "new-upload",
+            snippet: { title: "New public video", liveBroadcastContent: "none" },
+          },
+          {
+            id: "stream-recording",
+            snippet: { title: "Finished stream", liveBroadcastContent: "none" },
+            liveStreamingDetails: {
+              actualStartTime: new Date(now - 60_000).toISOString(),
+            },
+          },
+          {
+            id: "old-upload",
+            snippet: { title: "Old video", liveBroadcastContent: "none" },
+          },
+        ],
+      });
+    }
+    if (url === "https://discord.com/api/v10/channels/234567890123456789/messages") {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    let scheduledTask;
+    await worker.scheduled(
+      { scheduledTime: now },
+      {
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+        YOUTUBE_API_KEY: "test-youtube-key",
+      },
+      { waitUntil: (task) => { scheduledTask = task; } },
+    );
+    await scheduledTask;
+
+    const announcements = requests.filter((request) =>
+      request.url === "https://discord.com/api/v10/channels/234567890123456789/messages"
+    );
+    assert.equal(announcements.length, 1);
+    const announcement = JSON.parse(announcements[0].options.body);
+    assert.match(announcement.content, /New public video/);
+    assert.match(announcement.content, /watch\?v=new-upload/);
+    assert.doesNotMatch(announcement.content, /Finished stream/);
+
+    const settings = JSON.parse(values.get(streamSettingsKey));
+    assert.equal(settings.sources[0].lastObservedVideoId, "new-upload");
+    assert.equal(settings.sources[0].lastCheckedAt, now);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("announces Twitch VODs unless their live stream was already announced", async () => {
+  const originalFetch = globalThis.fetch;
+  const now = Date.now();
+  const streamSettingsKey = "stream-settings:123456789012345678";
+  const { values, store } = createMemoryStore([
+    [
+      streamSettingsKey,
+      JSON.stringify({
+        channelId: "234567890123456789",
+        sources: [{
+          platform: "twitch",
+          url: "https://www.twitch.tv/samplechannel",
+          channelId: "123456789",
+          channelLogin: "samplechannel",
+          displayName: "SampleChannel",
+          activeStreamId: "already-alerted-stream",
+          lastObservedVideoId: "older-vod",
+        }],
+      }),
+    ],
+  ]);
+  const requests = [];
+  globalThis.fetch = async (input, options) => {
+    const url = String(input);
+    requests.push({ url, options });
+    if (url === "https://id.twitch.tv/oauth2/token") {
+      return Response.json({
+        access_token: "test-twitch-token",
+        expires_in: 3600,
+      });
+    }
+    if (url.startsWith("https://api.twitch.tv/helix/streams?")) {
+      return Response.json({ data: [] });
+    }
+    if (url.startsWith("https://api.twitch.tv/helix/videos?")) {
+      return Response.json({
+        data: [
+          {
+            id: "already-alerted-vod",
+            title: "Already announced live",
+            url: "https://www.twitch.tv/videos/already-alerted-vod",
+            created_at: new Date(now - 10_000).toISOString(),
+            stream_id: "already-alerted-stream",
+          },
+          {
+            id: "unannounced-vod",
+            title: "VOD without a live alert",
+            url: "https://www.twitch.tv/videos/unannounced-vod",
+            created_at: new Date(now - 20_000).toISOString(),
+            stream_id: "unannounced-stream",
+          },
+          {
+            id: "older-vod",
+            title: "Old VOD",
+            url: "https://www.twitch.tv/videos/older-vod",
+            created_at: new Date(now - 120_000).toISOString(),
+            stream_id: "old-stream",
+          },
+        ],
+      });
+    }
+    if (url === "https://discord.com/api/v10/channels/234567890123456789/messages") {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    let scheduledTask;
+    await worker.scheduled(
+      { scheduledTime: now },
+      {
+        DISCORD_BOT_TOKEN: "test-bot-token",
+        FEEDBACK_CONFIG: store,
+        TWITCH_CLIENT_ID: "test-client-id",
+        TWITCH_CLIENT_SECRET: "test-client-secret",
+      },
+      { waitUntil: (task) => { scheduledTask = task; } },
+    );
+    await scheduledTask;
+
+    const announcements = requests.filter((request) =>
+      request.url === "https://discord.com/api/v10/channels/234567890123456789/messages"
+    );
+    assert.equal(announcements.length, 1);
+    assert.match(
+      JSON.parse(announcements[0].options.body).content,
+      /VOD without a live alert/,
+    );
+    assert.equal(
+      values.get("stream-live-alerted:123456789012345678:123456789:already-alerted-stream"),
+      "1",
+    );
+
+    const settings = JSON.parse(values.get(streamSettingsKey));
+    assert.equal(settings.sources[0].activeStreamId, null);
+    assert.equal(settings.sources[0].lastObservedVideoId, "already-alerted-vod");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -1,7 +1,5 @@
-import {
-  canManageFeedback,
-  readFeedbackSettings,
-} from "./feedback-settings";
+import { readFeedbackSettings } from "./feedback-settings";
+import { canManageServer } from "./permissions";
 import type { DiscordCommand } from "./types";
 
 const feedbackConfigCommand = {
@@ -16,7 +14,7 @@ const feedbackConfigCommand = {
         ephemeral: true,
       };
     }
-    if (!canManageFeedback(interaction)) {
+    if (!canManageServer(interaction)) {
       return {
         content: "You need Manage Server permission to view feedback configuration.",
         ephemeral: true,

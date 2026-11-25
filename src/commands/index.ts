@@ -17,6 +17,10 @@ import remindCommand from "./remind";
 import rollCommand from "./roll";
 import serverinfoCommand from "./serverinfo";
 import setupFeedbackCommand from "./setup-feedback";
+import setupStreamAlertsCommand from "./setup-stream-alerts";
+import streamAddCommand from "./stream-add";
+import streamListCommand from "./stream-list";
+import streamRemoveCommand from "./stream-remove";
 import timestampCommand from "./timestamp";
 import timeoutCommand from "./timeout";
 import unbanCommand from "./unban";
@@ -43,6 +47,10 @@ export const commands: DiscordCommand[] = [
   membercountCommand,
   pollCommand,
   remindCommand,
+  setupStreamAlertsCommand,
+  streamAddCommand,
+  streamRemoveCommand,
+  streamListCommand,
   kickCommand,
   banCommand,
   unbanCommand,

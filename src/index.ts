@@ -7,6 +7,7 @@ import type {
   WorkerExecutionContext,
 } from "./commands/types";
 import { processDueReminders } from "./reminders";
+import { processLiveStreamAlerts } from "./streams";
 
 export interface Env extends CommandEnvironment {
   DISCORD_PUBLIC_KEY: string;
@@ -271,7 +272,7 @@ export default {
     env: Env,
     executionContext: WorkerExecutionContext,
   ): Promise<void> {
-    const task = processDueReminders(env, controller.scheduledTime).catch(
+    const reminderTask = processDueReminders(env, controller.scheduledTime).catch(
       (error: unknown) => {
         console.error(
           "Scheduled reminder processing failed:",
@@ -279,6 +280,15 @@ export default {
         );
       },
     );
-    executionContext.waitUntil(task);
+    const streamTask = processLiveStreamAlerts(
+      env,
+      controller.scheduledTime,
+    ).catch((error: unknown) => {
+      console.error(
+        "Scheduled stream alert processing failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+    executionContext.waitUntil(Promise.all([reminderTask, streamTask]));
   },
 };
