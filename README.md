@@ -7,7 +7,7 @@ A serverless Discord bot built with TypeScript and Cloudflare Workers. It uses D
 - Ed25519 verification of every Discord interaction.
 - Slash commands for help, user profiles, timestamps, fun utilities, anonymous feedback, and moderation.
 - A `GET` health check.
-- Runs directly on Cloudflare Workers with no Java, Maven, or WebAssembly build.
+- Runs directly on Cloudflare Workers.
 
 ## Commands
 
